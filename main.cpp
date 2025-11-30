@@ -1,27 +1,27 @@
 /**
  * =============================================================
- * Cursor Monitor - High Performance C++ Implementation (Fixed)
+ * Cursor Monitor - High Performance C++ Implementation (Final)
  * =============================================================
  */
+
+// 1. 必须定义 NOMINMAX 以禁用 Windows 的 min/max 宏
+// 否则 std::max 和 std::min 会与 Windows 宏冲突，导致 C4002 和 C1075 错误
+#define NOMINMAX
 
 #define WIN32_LEAN_AND_MEAN
 #define _WINSOCK_DEPRECATED_NO_WARNINGS
 
-// 1. Winsock2 必须在 Windows.h 之前包含，防止重定义冲突
+// 2. 头文件包含顺序：网络 -> Windows -> COM -> 图形 -> C++标准库
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #include <iphlpapi.h>
 
-// 2. Windows 核心
 #include <windows.h>
-
 #include <objidl.h>
 
-// 4. GDI+ 和其他图形库
 #include <gdiplus.h>
 #include <shellscalingapi.h>
 
-// 5. C++ 标准库
 #include <iostream>
 #include <vector>
 #include <string>
@@ -32,11 +32,11 @@
 #include <map>
 #include <list>
 #include <chrono>
-#include <algorithm>
+#include <algorithm> // std::max, std::clamp
 #include <iomanip>
 #include <sstream>
 #include <memory>
-#include <fstream> // 用于文件日志
+#include <fstream>
 
 // 链接必要的库
 #pragma comment (lib, "ws2_32.lib")
