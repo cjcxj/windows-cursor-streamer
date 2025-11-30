@@ -535,7 +535,7 @@ public:
             Logger::Get().Debug("发送了新的光标图像，大小:", pngData.size());
         }
 
-        m_net.Broadcast(packet);
+        m_net.BroadcastPacket(packet);
     }
 };
 
