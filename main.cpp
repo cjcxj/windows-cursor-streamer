@@ -1,32 +1,44 @@
 /**
- * CursorMonitor - High Performance C++ Implementation
- * Replaces the Python cursor monitoring script.
+ * =============================================================
+ * Cursor Monitor - High Performance C++ Implementation (Fixed)
+ * =============================================================
  */
 
 #define WIN32_LEAN_AND_MEAN
-#include <windows.h>
+#define _WINSOCK_DEPRECATED_NO_WARNINGS
+
+// 1. Winsock2 必须在 Windows.h 之前包含，防止重定义冲突
 #include <winsock2.h>
 #include <ws2tcpip.h>
-#include <gdiplus.h>
-#include <shellscalingapi.h>
 #include <iphlpapi.h>
 
+// 2. Windows 核心
+#include <windows.h>
+
+#include <objidl.h>
+
+// 4. GDI+ 和其他图形库
+#include <gdiplus.h>
+#include <shellscalingapi.h>
+
+// 5. C++ 标准库
 #include <iostream>
 #include <vector>
 #include <string>
 #include <thread>
 #include <mutex>
+#include <condition_variable>
 #include <atomic>
 #include <map>
 #include <list>
 #include <chrono>
-#include <optional>
 #include <algorithm>
 #include <iomanip>
 #include <sstream>
-#include <fstream>
+#include <memory>
+#include <fstream> // 用于文件日志
 
- // Link necessary libs (can also be done in CMake)
+// 链接必要的库
 #pragma comment (lib, "ws2_32.lib")
 #pragma comment (lib, "gdi32.lib")
 #pragma comment (lib, "user32.lib")
