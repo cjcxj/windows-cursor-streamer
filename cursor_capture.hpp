@@ -34,7 +34,7 @@ public:
         if (hbmcolor) { DeleteObject(hbmcolor); hbmcolor = nullptr; }
     }
     
-    bool Capture(std::vector<BYTE>& out_png_data, int& out_hotspot_x, int& out_hotspot_y, DWORD& out_hcursor) {
+    bool Capture(std::vector<BYTE>& out_png_data, int& out_hotspot_x, int& out_hotspot_y, ULONG_PTR& out_hcursor) {
         try {
             CURSORINFO ci = {sizeof(CURSORINFO)};
             if (!GetCursorInfo(&ci) || ci.flags != CURSOR_SHOWING || !ci.hCursor) {
@@ -142,9 +142,8 @@ private:
                 int diff_r = rw - rb, diff_g = gw - gb, diff_b = bw - bb;
                 int max_diff = max({abs(diff_r), abs(diff_g), abs(diff_b)});
                 BYTE alpha = 255 - (BYTE)min(255, max_diff);
-                
-                DWORD color = ARGB(alpha, rb, gb, bb);
-                bmp->SetPixel(x, y, Color(color));
+
+                bmp->SetPixel(x, y, Color(alpha, rb, gb, bb));
             }
         }
         

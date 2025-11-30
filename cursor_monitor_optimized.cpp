@@ -7,6 +7,7 @@
 #include <windows.h>
 #include <winsock2.h>
 #include <ws2tcpip.h>
+#include <mstcpip.h>
 
 // 3. 【关键修复】手动引入 IStream 定义 (因为被 LEAN_AND_MEAN 排除掉了)
 #include <objidl.h>
