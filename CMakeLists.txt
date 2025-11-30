@@ -1,35 +1,28 @@
 cmake_minimum_required(VERSION 3.15)
-project(CursorMonitor)
+project(CursorMonitorCpp LANGUAGES CXX)
 
-# 设置 C++ 标准
 set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-# === 关键设置：静态链接 (/MT) ===
-# 这样生成的 EXE 可以在没有安装 VC++ 运行库的电脑上运行
+# 设置静态链接 (MT)，减少对 DLL 的依赖
 set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 
-# 查找 Zlib 库 (通过 vcpkg 自动提供)
-find_package(ZLIB REQUIRED)
+# 增加源文件
+add_executable(CursorMonitor main.cpp)
 
-# 定义源文件
-set(SOURCES
-    cursor_monitor_optimized.cpp # 如果你改名了，这里也要改
-    logger.hpp
-    cursor_capture.hpp
-    lru_cache.hpp
-    client_manager.hpp
-)
-
-# 创建可执行文件
-add_executable(CursorMonitor WIN32 ${SOURCES})
-
-# 链接库
+# 链接 Windows 系统库
 target_link_libraries(CursorMonitor PRIVATE
-    ZLIB::ZLIB      # Zlib 库
-    gdiplus.lib     # GDI+
-    ws2_32.lib      # Winsock
-    shlwapi.lib     # 系统辅助
+    ws2_32      # Winsock2 (网络)
+    gdi32       # GDI (绘图)
+    user32      # User32 (窗口/钩子)
+    gdiplus     # GDI+ (PNG 编码)
+    shcore      # DPI Awareness
+    ole32       # COM (IStream 用于内存流)
 )
 
-# 设置生成目录输出名称
-set_target_properties(CursorMonitor PROPERTIES OUTPUT_NAME "cursor_monitor")
+# 针对 Windows 子系统设置 (如果你不想看到控制台黑框，改为 WIN32)
+# 这里保留 CONSOLE 以便查看日志
+set_target_properties(CursorMonitor PROPERTIES LINK_FLAGS "/SUBSYSTEM:WINDOWS /ENTRY:mainCRTStartup")
+
+# 开启 Unicode 支持
+add_compile_definitions(UNICODE _UNICODE)

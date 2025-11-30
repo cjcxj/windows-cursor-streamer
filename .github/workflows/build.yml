@@ -1,0 +1,41 @@
+name: Build Windows Exe
+
+# 触发条件：推送到 main 分支，或手动触发
+on:
+  push:
+    branches: [ "cpp2" ]
+  pull_request:
+    branches: [ "cpp2" ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build Release
+    # 使用最新的 Windows 环境 (包含 MSVC 编译器和 CMake)
+    runs-on: windows-latest
+
+    steps:
+    # 1. 检出代码
+    - name: Checkout Code
+      uses: actions/checkout@v4
+
+    # 2. 配置 CMake
+    # -S . 表示源码在当前目录
+    # -B build 表示构建文件生成到 build 目录
+    - name: Configure CMake
+      run: cmake -S . -B build
+
+    # 3. 编译 (Release 模式)
+    # --config Release 会自动开启 -O2 优化
+    - name: Build Project
+      run: cmake --build build --config Release
+
+    # 4. 上传构建产物 (exe)
+    # 你可以在 Actions 运行完成后下载这个文件
+    - name: Upload Artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: CursorMonitor-Windows
+        path: build/Release/CursorMonitor.exe
+        if-no-files-found: error
+        retention-days: 5
