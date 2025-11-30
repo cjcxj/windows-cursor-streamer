@@ -1,0 +1,50 @@
+name: Build Windows EXE
+
+on:
+  push:
+    branches: [ "c++" ]
+  pull_request:
+    branches: [ "c++" ]
+  workflow_dispatch: # 允许手动点击按钮触发
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+    - uses: actions/checkout@v3
+
+    # 1. 缓存 vcpkg 下载的内容，加快构建速度
+    - name: Restore artifacts, or setup vcpkg
+      uses: lukka/run-vcpkg@v11
+      with:
+        # 安装静态版本的 zlib，确保生成的 exe 单文件可运行
+        vcpkgGitCommitId: 'latest'
+        vcpkgArguments: 'zlib:x64-windows-static'
+        vcpkgDirectory: '${{ runner.workspace }}/b/vcpkg'
+        vcpkgJsonGlob: 'vcpkg.json'
+
+    # 2. 配置 CMake
+    - name: Configure CMake
+      run: >
+        cmake -S . -B build
+        -DCMAKE_BUILD_TYPE=Release
+        -DCMAKE_TOOLCHAIN_FILE="${{ runner.workspace }}/b/vcpkg/scripts/buildsystems/vcpkg.cmake"
+        -DVCPKG_TARGET_TRIPLET=x64-windows-static
+
+    # 3. 编译代码
+    - name: Build
+      run: cmake --build build --config Release
+
+    # 4. (可选) 获取文件大小信息，方便在日志里看
+    - name: Check File Size
+      run: |
+        Get-ChildItem build/Release/*.exe | Select-Object Name, @{Name="Size(KB)";Expression={$_.Length / 1KB}}
+
+    # 5. 上传生成的 EXE 到 GitHub Actions 的 Summary 页面
+    - name: Upload Artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: cursor_monitor_exe
+        path: build/Release/cursor_monitor.exe
+        retention-days: 5
