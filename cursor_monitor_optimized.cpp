@@ -33,6 +33,10 @@ using std::max;
 #include "client_manager.hpp"
 #include "cursor_capture.hpp"
 
+#ifndef SIO_UDP_CONNRESET
+#define SIO_UDP_CONNRESET _WSAIOW(IOC_VENDOR, 12)
+#endif
+
 using namespace Gdiplus;
 
 Logger g_logger("cursor_monitor. log");
@@ -115,7 +119,7 @@ void ProcessCursorWorker() {
         CursorCapture capture;
         std::vector<BYTE> png_data;
         int hotspot_x, hotspot_y;
-        DWORD hcursor;
+        ULONG_PTR hcursor;
         
         if (!capture. Capture(png_data, hotspot_x, hotspot_y, hcursor)) {
             return;

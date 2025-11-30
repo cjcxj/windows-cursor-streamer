@@ -96,7 +96,7 @@ public:
             }
             
             delete bmp_result;
-            out_hcursor = (DWORD)ci.hCursor;
+            out_hcursor = (ULONG_PTR)ci.hCursor;
             return true;
             
         } catch (const std::exception& e) {
