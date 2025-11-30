@@ -2,9 +2,9 @@ name: Build Windows EXE
 
 on:
   push:
-    branches: [ "c++" ]
+    branches: [ "cpp" ]
   pull_request:
-    branches: [ "c++" ]
+    branches: [ "cpp" ]
   workflow_dispatch: # 允许手动点击按钮触发
 
 jobs:
