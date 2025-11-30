@@ -19,8 +19,8 @@ jobs:
     - name: Setup vcpkg
       uses: lukka/run-vcpkg@v11
       with:
-        # 这是 vcpkg 官方仓库 2024年底的一个稳定版本 Commit ID
-        vcpkgGitCommitId: 'e741753738e411b7428f7311394c653609805973'
+        # 在这里填入你找到的 40 位 ID
+        vcpkgGitCommitId: 'b322364f06308bdd24823f9d8f03fe0cc86fd46f'
         vcpkgDirectory: '${{ runner.workspace }}/b/vcpkg'
         vcpkgJsonGlob: 'vcpkg.json'
 
