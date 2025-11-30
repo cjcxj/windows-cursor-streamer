@@ -313,7 +313,7 @@ void CALLBACK WinEventProc(HWINEVENTHOOK hWinEventHook, DWORD event, HWND hwnd,
     if (idObject == OBJID_CURSOR) {
         CURSORINFO ci = {sizeof(CURSORINFO)};
         if (GetCursorInfo(&ci) && ci.hCursor) {
-            DWORD current_hcursor = (DWORD)ci.hCursor;
+            DWORD current_hcursor = (ULONG_PTR)ci.hCursor;
             
             if (current_hcursor != g_last_hcursor) {
                 g_last_hcursor = current_hcursor;

@@ -21,7 +21,7 @@ set(SOURCES
 )
 
 # 创建可执行文件
-add_executable(CursorMonitor ${SOURCES})
+add_executable(CursorMonitor WIN32 ${SOURCES})
 
 # 链接库
 target_link_libraries(CursorMonitor PRIVATE
