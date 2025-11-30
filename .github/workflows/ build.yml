@@ -14,13 +14,13 @@ jobs:
     steps:
     - uses: actions/checkout@v3
 
-    # 1. 缓存 vcpkg 下载的内容，加快构建速度
-    - name: Restore artifacts, or setup vcpkg
+    # 1. 设置 vcpkg
+    # 修复点：使用了具体的 commit id，并移除了 vcpkgArguments
+    - name: Setup vcpkg
       uses: lukka/run-vcpkg@v11
       with:
-        # 安装静态版本的 zlib，确保生成的 exe 单文件可运行
-        vcpkgGitCommitId: 'latest'
-        vcpkgArguments: 'zlib:x64-windows-static'
+        # 这是 vcpkg 官方仓库 2024年底的一个稳定版本 Commit ID
+        vcpkgGitCommitId: 'e741753738e411b7428f7311394c653609805973'
         vcpkgDirectory: '${{ runner.workspace }}/b/vcpkg'
         vcpkgJsonGlob: 'vcpkg.json'
 
@@ -36,12 +36,12 @@ jobs:
     - name: Build
       run: cmake --build build --config Release
 
-    # 4. (可选) 获取文件大小信息，方便在日志里看
+    # 4. 检查生成结果
     - name: Check File Size
       run: |
         Get-ChildItem build/Release/*.exe | Select-Object Name, @{Name="Size(KB)";Expression={$_.Length / 1KB}}
 
-    # 5. 上传生成的 EXE 到 GitHub Actions 的 Summary 页面
+    # 5. 上传生成的 EXE
     - name: Upload Artifact
       uses: actions/upload-artifact@v4
       with:
