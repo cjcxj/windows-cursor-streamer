@@ -218,7 +218,9 @@ public:
         WSACleanup();
     }
 
-    // 返回 true 表示是新客户端或重启的客户端
+    // 返回值含义：
+    // true = 这是一个全新的客户端会话，需要清空缓存
+    // false = 这是一个已知的客户端，或者是一个非HELLO消息，无需操作
     bool HandleClientMessage(const std::string& msg, const sockaddr_in6& clientAddr) {
         char ipStr[INET6_ADDRSTRLEN];
         inet_ntop(AF_INET6, &clientAddr.sin6_addr, ipStr, INET6_ADDRSTRLEN);
@@ -228,32 +230,42 @@ public:
         std::lock_guard<std::mutex> lock(m_clientsMutex);
 
         if (msg == "CURSOR_HELLO") {
-            // 清理来自同一 IP 但不同端口的旧连接
-            auto it = m_clients.begin();
-            while (it != m_clients.end()) {
-                char existingIp[INET6_ADDRSTRLEN];
-                inet_ntop(AF_INET6, &it->second.addr.sin6_addr, existingIp, INET6_ADDRSTRLEN);
-                if (ipKey == existingIp && it->first != fullKey) {
-                    Logger::Get().Info("Client reconnected (new port), removing old:", it->first);
-                    it = m_clients.erase(it);
+            bool needsReset = false;
+
+            // 检查这个 fullKey (IP:Port) 是否已经存在
+            if (m_clients.find(fullKey) == m_clients.end()) {
+                // 情况1：这是一个全新的客户端 (IP:Port 组合之前没有)
+                needsReset = true;
+
+                // 清理来自同一 IP 但不同端口的旧连接 (重连逻辑)
+                auto it = m_clients.begin();
+                while (it != m_clients.end()) {
+                    char existingIp[INET6_ADDRSTRLEN];
+                    inet_ntop(AF_INET6, &it->second.addr.sin6_addr, existingIp, INET6_ADDRSTRLEN);
+                    if (ipKey == existingIp && it->first != fullKey) {
+                        Logger::Get().Info("客户端重连 (新端口), 移除旧连接:", it->first);
+                        it = m_clients.erase(it);
+                        // 因为发生了重连，也需要重置缓存
+                        needsReset = true;
+                    } else {
+                        ++it;
+                    }
                 }
-                else {
-                    ++it;
-                }
+
+                Logger::Get().Info("新客户端已连接:", fullKey);
             }
 
-            bool isNew = m_clients.find(fullKey) == m_clients.end();
+            // 无论如何，都更新活动时间
             m_clients[fullKey] = { clientAddr, std::chrono::steady_clock::now() };
-            if (isNew) Logger::Get().Info("新客户端已连接:", fullKey);
-            
-            return true; // 只要是 HELLO，都触发全量刷新
-        }
-        else if (msg == "KEEPALIVE") {
+
+            return needsReset;
+
+        } else if (msg == "KEEPALIVE") {
             if (m_clients.count(fullKey)) {
                 m_clients[fullKey].last_activity = std::chrono::steady_clock::now();
             }
         }
-        return false;
+        return false; // KEEPALIVE 或其他消息永远不触发重置
     }
 
     void BroadcastPacket(const std::vector<uint8_t>& packet) {
