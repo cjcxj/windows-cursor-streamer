@@ -37,7 +37,7 @@ public:
     bool Capture(std::vector<BYTE>& out_png_data, int& out_hotspot_x, int& out_hotspot_y, DWORD& out_hcursor) {
         try {
             CURSORINFO ci = {sizeof(CURSORINFO)};
-            if (!GetCursorInfo(&ci) || ci.flags != CURSOR_SHOWING || ! ci.hCursor) {
+            if (!GetCursorInfo(&ci) || ci.flags != CURSOR_SHOWING || !ci.hCursor) {
                 return false;
             }
             

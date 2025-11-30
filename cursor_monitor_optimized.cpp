@@ -1,8 +1,22 @@
+// 1. 瘦身 Windows 头文件，解决 Winsock 重定义冲突
 #define WIN32_LEAN_AND_MEAN
+
+// 2. 禁用 Windows 自带的 min/max 宏，防止干扰 C++ std::min/max
+#define NOMINMAX
 
 #include <windows.h>
 #include <winsock2.h>
 #include <ws2tcpip.h>
+
+// 3. 【关键修复】手动引入 IStream 定义 (因为被 LEAN_AND_MEAN 排除掉了)
+#include <objidl.h>
+
+// 4. 引入算法库，弥补禁用宏后的 min/max
+#include <algorithm>
+// 方便代码中直接使用 min/max (你的代码里用到了)
+using std::min;
+using std::max;
+
 #include <thread>
 #include <atomic>
 #include <cstring>
