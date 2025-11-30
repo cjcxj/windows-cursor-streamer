@@ -115,54 +115,55 @@ void ProcessCursorWorker() {
     try {
         auto clients = g_client_manager.GetAllClients();
         if (clients.empty()) return;
-        
+
         CursorCapture capture;
         std::vector<BYTE> png_data;
         int hotspot_x, hotspot_y;
-        ULONG_PTR hcursor;
-        
-        if (!capture. Capture(png_data, hotspot_x, hotspot_y, hcursor)) {
+        ULONG_PTR hcursor; // 之前修正的类型
+
+        if (!capture.Capture(png_data, hotspot_x, hotspot_y, hcursor)) {
             return;
         }
-        
-        // CRC32 校验和
-        uint32_t img_hash = crc32(0, png_data.data(), (unsigned int)png_data.size());
-        bool is_new = g_image_cache.Add(img_hash);
-        
+
+        // CRC32 校验和 (32位)
+        uint32_t img_hash_32 = crc32(0, png_data.data(), (unsigned int)png_data.size());
+
+        // ⚠️ 关键修改：为了匹配 Python 的 'Q' (unsigned long long)，这里转为 64 位
+        uint64_t img_hash_64 = (uint64_t)img_hash_32;
+
+        bool is_new = g_image_cache.Add(img_hash_32); // 缓存还是用 32 位 key 即可
+
         std::vector<BYTE> packet;
-        
+
+        // 协议头长度 = 1(Type) + 8(Hash) + 4(X) + 4(Y) = 17 字节
         if (is_new) {
-            // 格式: 1字节类型(0) + 4字节hash + 4字节hotX + 4字节hotY + PNG数据
-            packet.resize(1 + 4 + 4 + 4 + png_data.size());
-            packet[0] = 0;
-            memcpy(packet.data() + 1, &img_hash, 4);
-            memcpy(packet. data() + 5, &hotspot_x, 4);
-            memcpy(packet.data() + 9, &hotspot_y, 4);
-            memcpy(packet.data() + 13, png_data. data(), png_data.size());
-            
-            g_logger.Info("📤 Sending new image: hash=" + std::to_string(img_hash) +
+            // === 全量包 (Type 0) ===
+            packet.resize(17 + png_data.size());
+
+            packet[0] = 0; // Type
+            memcpy(packet.data() + 1, &img_hash_64, 8); // Hash (8 bytes)
+            memcpy(packet.data() + 9, &hotspot_x, 4);   // X (4 bytes)
+            memcpy(packet.data() + 13, &hotspot_y, 4);  // Y (4 bytes)
+            memcpy(packet.data() + 17, png_data.data(), png_data.size()); // Data
+
+            g_logger.Info("📤 Sending new image: hash=" + std::to_string(img_hash_32) +
                          ", size=" + std::to_string(png_data.size()) + " bytes");
         } else {
-            // 仅发送hash
-            packet.resize(1 + 4 + 4 + 4);
-            packet[0] = 1;
-            memcpy(packet.data() + 1, &img_hash, 4);
-            memcpy(packet. data() + 5, &hotspot_x, 4);
-            memcpy(packet.data() + 9, &hotspot_y, 4);
+            // === 缓存包 (Type 1) ===
+            packet.resize(17);
+
+            packet[0] = 1; // Type
+            memcpy(packet.data() + 1, &img_hash_64, 8); // Hash (8 bytes)
+            memcpy(packet.data() + 9, &hotspot_x, 4);   // X (4 bytes)
+            memcpy(packet.data() + 13, &hotspot_y, 4);  // Y (4 bytes)
         }
-        
+
         // 发送给所有客户端
-        int success_count = 0;
         for (const auto& client : clients) {
-            if (sendto(g_socket, (const char*)packet.data(), (int)packet.size(), 0,
-                      (sockaddr*)&client.addr, sizeof(client.addr)) != SOCKET_ERROR) {
-                success_count++;
-            }
+            sendto(g_socket, (const char*)packet.data(), (int)packet.size(), 0,
+                  (sockaddr*)&client.addr, sizeof(client.addr));
         }
-        
-        g_logger.Debug("Sent to " + std::to_string(success_count) + 
-                      "/" + std::to_string(clients.size()) + " clients");
-        
+
     } catch (const std::exception& e) {
         g_logger.Error(std::string("ProcessCursorWorker error: ") + e.what());
     }
