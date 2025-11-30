@@ -1,6 +1,8 @@
+#define WIN32_LEAN_AND_MEAN
+
 #include <windows.h>
 #include <winsock2.h>
-#include <ws2tcpip. h>
+#include <ws2tcpip.h>
 #include <thread>
 #include <atomic>
 #include <cstring>
@@ -8,7 +10,7 @@
 #include <gdiplus.h>
 
 #pragma comment(lib, "ws2_32.lib")
-#pragma comment(lib, "gdiplus. lib")
+#pragma comment(lib, "gdiplus.lib")
 #pragma comment(lib, "zlib.lib")
 
 #include "logger.hpp"

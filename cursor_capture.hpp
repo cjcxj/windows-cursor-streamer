@@ -46,14 +46,14 @@ public:
                 return false;
             }
             
-            out_hotspot_x = ii. xHotspot;
-            out_hotspot_y = ii. yHotspot;
+            out_hotspot_x = ii.xHotspot;
+            out_hotspot_y = ii.yHotspot;
             hbmask = ii.hbmMask;
             hbmcolor = ii.hbmColor;
             
             // 获取位图大小
             BITMAP bm = {};
-            GetObject(hbmcolor ?  hbmcolor : hbmask, sizeof(BITMAP), &bm);
+            GetObject(hbmcolor ? hbmcolor : hbmask, sizeof(BITMAP), &bm);
             int w = bm.bmWidth;
             int h = hbmcolor ? bm.bmHeight : (bm.bmHeight / 2);
             
@@ -82,7 +82,7 @@ public:
             // 白色背景
             HBRUSH hbrush_white = CreateSolidBrush(RGB(255, 255, 255));
             FillRect(hdc_mem_white, &rect, hbrush_white);
-            DrawIconEx(hdc_mem_white, 0, 0, ci. hCursor, w, h, 0, nullptr, DI_NORMAL);
+            DrawIconEx(hdc_mem_white, 0, 0, ci.hCursor, w, h, 0, nullptr, DI_NORMAL);
             DeleteObject(hbrush_white);
             
             // 获取像素数据（使用GDI+保存为PNG）

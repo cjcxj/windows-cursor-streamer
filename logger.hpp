@@ -15,7 +15,7 @@ private:
         auto time = std::chrono::system_clock::to_time_t(now);
         std::stringstream ss;
         ss << std::put_time(std::localtime(&time), "%Y-%m-%d %H:%M:%S");
-        return ss. str();
+        return ss.str();
     }
 public:
     Logger(const std::string& filename = "cursor_monitor.log") {
