@@ -452,14 +452,14 @@ public:
         FillRect(dcMem, &rc, (HBRUSH)GetStockObject(WHITE_BRUSH));
         DrawIconEx(dcMem, 0, 0, hIcon, w, h, 0, NULL, DI_NORMAL);
 
-        // 3. 像素处理
-        // 注意：GDI DIB 是 BGRA 格式
+        // 3. 像素处理 (重构为两遍处理)
         uint32_t* pxB = (uint32_t*)pBitsB;
         uint32_t* pxW = (uint32_t*)pBitsW;
         int numPixels = w * h;
         std::vector<uint32_t> finalPixels(numPixels);
+        std::vector<bool> xorMask(numPixels, false); // 用于记录XOR区域的掩码
 
-        // C++ 的直接内存访问比 Python 快得多
+        // --- 第一遍：识别像素类型并生成基础图像 ---
         for (int i = 0; i < numPixels; ++i) {
             uint8_t bb = (pxB[i] & 0xFF);
             uint8_t bg = ((pxB[i] >> 8) & 0xFF);
@@ -469,36 +469,57 @@ public:
             uint8_t wg = ((pxW[i] >> 8) & 0xFF);
             uint8_t wr = ((pxW[i] >> 16) & 0xFF);
 
-            // 计算 Alpha: (White - Black) 的反向
-            // 简单化：Alpha = 255 - (Diff)
             int dr = (int)wr - br;
             int dg = (int)wg - bg;
             int db = (int)wb - bb;
-
-            // 真实的 diff 应该是 R_w - R_b
             int maxDiff = std::max({ dr, dg, db });
             uint8_t alpha = (uint8_t)(std::clamp(255 - maxDiff, 0, 255));
 
-            // 检测 XOR 区域 (Black 背景比 White 背景亮)
-            bool isXor = ((int)br > (int)wr + 50) || ((int)bg > (int)wg + 50) || ((int)bb > (int)wb + 50);
+            // 使用更鲁棒的亮度计算来判断XOR
+            // (0.299*R + 0.587*G + 0.114*B)
+            int lumB = (br * 299 + bg * 587 + bb * 114) / 1000;
+            int lumW = (wr * 299 + wg * 587 + wb * 114) / 1000;
+
+            bool isXor = (lumB > lumW + 50);
 
             if (isXor) {
-                // XOR 变为白色，全不透明
-                finalPixels[i] = 0xFFFFFFFF; // ARGB: White
-            }
-            else {
-                // 正常颜色使用黑色背景的颜色
+                xorMask[i] = true;
+                finalPixels[i] = 0xFFFFFFFF; // ARGB: White, full alpha
+            } else {
                 finalPixels[i] = (alpha << 24) | (br << 16) | (bg << 8) | bb;
             }
         }
 
-        // 4. 使用 GDI+ 生成 PNG
+        // --- 第二遍：为 XOR 区域添加黑色轮廓 (模拟膨胀) ---
+        std::vector<uint32_t> outlinedPixels = finalPixels; // 复制一份用于修改
+        for (int y = 0; y < h; ++y) {
+            for (int x = 0; x < w; ++x) {
+                int idx = y * w + x;
+                // 如果当前像素不是XOR，但它的邻居是XOR，那么它就是轮廓
+                if (!xorMask[idx]) {
+                    bool neighborIsXor = false;
+                    // 检查上下左右四个邻居
+                    if (y > 0     && xorMask[(y - 1) * w + x]) neighborIsXor = true; // 上
+                    if (!neighborIsXor && y < h - 1 && xorMask[(y + 1) * w + x]) neighborIsXor = true; // 下
+                    if (!neighborIsXor && x > 0     && xorMask[y * w + (x - 1)]) neighborIsXor = true; // 左
+                    if (!neighborIsXor && x < w - 1 && xorMask[y * w + (x + 1)]) neighborIsXor = true; // 右
+
+                    if (neighborIsXor) {
+                        // 将这个邻居像素强制设为不透明的黑色
+                        outlinedPixels[idx] = 0xFF000000; // ARGB: Black, full alpha
+                    }
+                }
+            }
+        }
+
+        // 4. 使用 GDI+ 生成 PNG (使用添加了轮廓的像素数据)
         Gdiplus::Bitmap gdiBitmap(w, h, PixelFormat32bppARGB);
         Gdiplus::BitmapData data;
         Gdiplus::Rect rect(0, 0, w, h);
 
         gdiBitmap.LockBits(&rect, Gdiplus::ImageLockModeWrite, PixelFormat32bppARGB, &data);
-        memcpy(data.Scan0, finalPixels.data(), numPixels * 4);
+        // 注意：这里使用 outlinedPixels 而不是 finalPixels
+        memcpy(data.Scan0, outlinedPixels.data(), numPixels * 4);
         gdiBitmap.UnlockBits(&data);
 
         IStream* pStream = NULL;
