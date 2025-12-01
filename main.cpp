@@ -60,43 +60,68 @@ const int LRU_CACHE_SIZE = 100;
 //           2. 工具类与日志
 // ==========================================
 
+enum class LogLevel {
+    TRACE = 0,
+    DEBUG = 1,
+    INFO = 2,
+    LOG_ERROR = 3
+};
 
 class Logger {
     std::mutex m_mutex;
     std::ofstream m_file; // 文件流
+    LogLevel m_level;
 public:
     static Logger& Get() {
         static Logger instance;
         return instance;
     }
 
-    Logger() {
+    Logger() : m_level(LogLevel::DEBUG) {
         // 以追加模式打开日志文件
         m_file.open("cursor_monitor.log", std::ios::app);
+        
+        // 检查是否设置了环境变量来控制日志级别
+        char* envLevel = std::getenv("CURSOR_LOG_LEVEL");
+        if (envLevel != nullptr) {
+            std::string level(envLevel);
+            if (level == "TRACE") m_level = LogLevel::TRACE;
+            else if (level == "DEBUG") m_level = LogLevel::DEBUG;
+            else if (level == "INFO") m_level = LogLevel::INFO;
+            else if (level == "ERROR") m_level = LogLevel::LOG_ERROR;
+        }
     }
 
     ~Logger() {
         if (m_file.is_open()) m_file.close();
     }
+    
+    void SetLogLevel(LogLevel level) {
+        m_level = level;
+    }
 
     template<typename... Args>
     void Info(Args... args) {
-    Log("[信息] ", args...);
+        if (m_level <= LogLevel::INFO)
+            Log("[信息] ", args...);
     }
 
     template<typename... Args>
     void Error(Args... args) {
-    Log("[错误] ", args...);
+        if (m_level <= LogLevel::LOG_ERROR)
+            Log("[错误] ", args...);
     }
 
     template<typename... Args>
     void Debug(Args... args) {
-         Log("[调试] ", args...);
+        if (m_level <= LogLevel::DEBUG)
+            Log("[调试] ", args...);
     }
 
     template<typename... Args>
     void Trace(Args... args) {
-         Log("[跟踪] ", args...);
+        if (m_level <= LogLevel::TRACE)
+            Log("[跟踪] ", args...);
     }
 
 private:
@@ -785,8 +810,52 @@ void NetworkThread() {
     Logger::Get().Info("网络线程已结束。");
 }
 
-int main() {
+void ShowUsage() {
+    std::cout << "用法: cursor_monitor [选项]\n"
+              << "选项:\n"
+              << "  -h, --help          显示此帮助信息\n"
+              << "  -l, --log-level LVL 设置日志级别 (TRACE, DEBUG, INFO, ERROR)\n"
+              << "                      默认为 DEBUG\n";
+}
+
+LogLevel ParseLogLevel(const std::string& levelStr) {
+    if (levelStr == "TRACE") return (LogLevel::TRACE);
+    if (levelStr == "DEBUG") return (LogLevel::DEBUG);
+    if (levelStr == "INFO") return (LogLevel::INFO);
+    if (levelStr == "ERROR") return (LogLevel::LOG_ERROR);
+    return (LogLevel::DEBUG); // 默认级别
+}
+
+int main(int argc, char* argv[]) {
+    // 解析命令行参数
+    LogLevel logLevel = LogLevel::DEBUG;
+    for (int i = 1; i < argc; ++i) {
+        std::string arg = argv[i];
+        if (arg == "-h" || arg == "--help") {
+            ShowUsage();
+            return 0;
+        } else if (arg == "-l" || arg == "--log-level") {
+            if (i + 1 < argc) {
+                logLevel = ParseLogLevel(argv[++i]);
+            } else {
+                std::cerr << "错误: " << arg << " 需要一个参数\n";
+                return 1;
+            }
+        }
+    }
+    
+    Logger::Get().SetLogLevel(logLevel);
     Logger::Get().Info("======= 程序启动 =======");
+    
+    // 记录当前日志级别
+    std::string levelStr = "UNKNOWN";
+    switch (logLevel) {
+        case LogLevel::TRACE: levelStr = "TRACE"; break;
+        case LogLevel::DEBUG: levelStr = "DEBUG"; break;
+        case LogLevel::INFO: levelStr = "INFO"; break;
+        case LogLevel::LOG_ERROR: levelStr = "ERROR"; break;
+    }
+    Logger::Get().Info("当前日志级别: ", levelStr);
     // 1. 高 DPI 设置
     Logger::Get().Debug("设置进程DPI感知");
     SetProcessDpiAwareness(PROCESS_PER_MONITOR_DPI_AWARE);
