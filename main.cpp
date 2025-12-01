@@ -392,11 +392,11 @@ public:
     }
 
     void Clear() {
-        Logger::Get().Trace("清空缓存");
+        Logger::Get().Debug("清空缓存");
         std::lock_guard<std::mutex> lock(m_lock);
         m_map.clear();
         m_lruList.clear();
-        Logger::Get().Trace("缓存清空完成");
+        Logger::Get().Debug("缓存清空完成");
     }
     
     size_t Size() const {
@@ -412,7 +412,7 @@ class CursorEngine {
 
     // COM IStream wrapper for GDI+ saving
     static int GetEncoderClsid(const WCHAR* format, CLSID* pClsid) {
-        Logger::Get().Trace("获取图像编码器CLSID");
+        Logger::Get().Debug("获取图像编码器CLSID");
         UINT  num = 0, size = 0;
         Gdiplus::GetImageEncodersSize(&num, &size);
         if (size == 0) {
@@ -425,7 +425,7 @@ class CursorEngine {
         for (UINT j = 0; j < num; ++j) {
             if (wcscmp(pImageCodecInfo[j].MimeType, format) == 0) {
                 *pClsid = pImageCodecInfo[j].Clsid;
-                Logger::Get().Trace("找到图像编码器");
+                Logger::Get().Debug("找到图像编码器");
                 return j;
             }
         }
@@ -435,25 +435,25 @@ class CursorEngine {
 
 public:
     CursorEngine(NetworkManager& net) : m_net(net), m_gdiplusToken(0) {
-        Logger::Get().Trace("初始化光标引擎");
+        Logger::Get().Info("初始化光标引擎");
         Gdiplus::GdiplusStartupInput gdiplusStartupInput;
         Gdiplus::GdiplusStartup(&m_gdiplusToken, &gdiplusStartupInput, NULL);
-        Logger::Get().Trace("光标引擎初始化完成");
+        Logger::Get().Info("光标引擎初始化完成");
     }
 
     ~CursorEngine() {
-        Logger::Get().Trace("销毁光标引擎");
+        Logger::Get().Info("销毁光标引擎");
         Gdiplus::GdiplusShutdown(m_gdiplusToken);
-        Logger::Get().Trace("光标引擎销毁完成");
+        Logger::Get().Info("光标引擎销毁完成");
     }
 
     void ResetCache() {
-        Logger::Get().Trace("重置光标缓存");
+        Logger::Get().Debug("重置光标缓存");
         m_cache.Clear();
     }
 
     void CaptureAndSend() {
-        Logger::Get().Trace("开始捕获和发送光标");
+        Logger::Get().Debug("开始捕获和发送光标");
         // 1. 获取光标信息
         CURSORINFO ci = { 0 };
         ci.cbSize = sizeof(ci);
@@ -462,7 +462,7 @@ public:
             return;
         }
         if (ci.flags == 0) {
-            Logger::Get().Trace("光标隐藏，跳过处理");
+            Logger::Get().Debug("光标隐藏，跳过处理");
             return; // 光标隐藏
         }
 
@@ -495,7 +495,7 @@ public:
         if (w > 512) w = 512;
         if (h > 512) h = 512;
         
-        Logger::Get().Trace("光标尺寸: ", w, "x", h);
+        Logger::Get().Debug("光标尺寸: ", w, "x", h);
 
         // 2. 准备黑白背景绘制 (模拟 Python 中的 NumPy 异或检测)
         // 创建内存 DC
@@ -541,7 +541,7 @@ public:
         std::vector<uint32_t> finalPixels(numPixels);
         std::vector<bool> xorMask(numPixels, false); // 用于记录XOR区域的掩码
 
-        Logger::Get().Trace("开始像素处理");
+        Logger::Get().Debug("开始像素处理");
         // --- 第一遍：识别像素类型并生成基础图像 ---
         int xorPixelCount = 0;
         for (int i = 0; i < numPixels; ++i) {
@@ -599,10 +599,10 @@ public:
             }
         }
 
-        Logger::Get().Trace("像素处理完成，XOR像素数: ", xorPixelCount, " 轮廓像素数: ", outlinePixelCount);
+        Logger::Get().Debug("像素处理完成，XOR像素数: ", xorPixelCount, " 轮廓像素数: ", outlinePixelCount);
 
         // 4. 使用 GDI+ 生成 PNG (使用添加了轮廓的像素数据)
-        Logger::Get().Trace("创建GDI+位图");
+        Logger::Get().Debug("创建GDI+位图");
         Gdiplus::Bitmap gdiBitmap(w, h, PixelFormat32bppARGB);
         Gdiplus::BitmapData data;
         Gdiplus::Rect rect(0, 0, w, h);
@@ -620,7 +620,7 @@ public:
 
         CLSID pngClsid;
         GetEncoderClsid(L"image/png", &pngClsid);
-        Logger::Get().Trace("保存PNG图像");
+        Logger::Get().Debug("保存PNG图像");
         gdiBitmap.Save(pStream, &pngClsid, NULL);
 
         // 获取 PNG 数据
@@ -634,11 +634,11 @@ public:
         pStream->Read(pngData.data(), pngData.size(), &bytesRead);
         pStream->Release();
 
-        Logger::Get().Trace("PNG数据大小: ", pngData.size());
+        Logger::Get().Debug("PNG数据大小: ", pngData.size());
 
         // 5. 缓存与发送
         uint32_t hash = CalculateCRC32(pngData);
-        Logger::Get().Trace("计算PNG数据哈希: ", hash);
+        Logger::Get().Debug("计算PNG数据哈希: ", hash);
         bool isNew = m_cache.Add(hash);
 
         // Packet Structure:
@@ -664,11 +664,11 @@ public:
             packet.insert(packet.end(), pngData.begin(), pngData.end());
             Logger::Get().Debug("发送了新的光标图像，大小:", pngData.size(), " 哈希:", hash);
         } else {
-            Logger::Get().Trace("发送缓存的光标图像，哈希:", hash);
+            Logger::Get().Debug("发送缓存的光标图像，哈希:", hash);
         }
 
         m_net.BroadcastPacket(packet);
-        Logger::Get().Trace("捕获和发送光标完成");
+        Logger::Get().Debug("捕获和发送光标完成");
     }
 };
 
@@ -690,7 +690,7 @@ void CALLBACK WinEventProc(HWINEVENTHOOK hWinEventHook, DWORD event, HWND hwnd,
                           LONG idObject, LONG idChild, DWORD dwEventThread, DWORD dwmsEventTime)
 {
     if (idObject == OBJID_CURSOR) {
-        Logger::Get().Trace("收到光标变化事件");
+        Logger::Get().Debug("收到光标变化事件");
         // 通知工作线程
         std::lock_guard<std::mutex> lock(g_mutexCursor);
         g_cursorChanged = true;
@@ -704,20 +704,20 @@ void WorkerThread() {
     while (!g_shouldExit) {
         {
             std::unique_lock<std::mutex> lock(g_mutexCursor);
-            Logger::Get().Trace("工作线程等待光标变化");
+            Logger::Get().Debug("工作线程等待光标变化");
             g_cvCursorChanged.wait(lock, [] { return g_cursorChanged || g_shouldExit; });
             if (g_shouldExit) {
-                Logger::Get().Trace("工作线程收到退出信号");
+                Logger::Get().Debug("工作线程收到退出信号");
                 break;
             }
             g_cursorChanged = false;
-            Logger::Get().Trace("工作线程被唤醒，开始处理光标变化");
+            Logger::Get().Debug("工作线程被唤醒，开始处理光标变化");
         }
 
         if (g_net.HasClients()) {
             g_cursorEngine->CaptureAndSend();
         } else {
-            Logger::Get().Trace("没有客户端连接，跳过光标处理");
+            Logger::Get().Debug("没有客户端连接，跳过光标处理");
         }
     }
     Logger::Get().Info("工作线程已结束。");
@@ -735,7 +735,7 @@ void NetworkThread() {
 
     while (!g_shouldExit) {
         // 1. 处理传入数据
-        Logger::Get().Trace("等待网络数据");
+        Logger::Get().Debug("等待网络数据");
         int received = recvfrom(g_net.GetSocket(), buffer, sizeof(buffer) - 1, 0, (sockaddr*)&clientAddr, &addrLen);
 
         if (received > 0) {
@@ -745,12 +745,12 @@ void NetworkThread() {
             // 简单的 trim
             msg.erase(msg.find_last_not_of(" \n\r\t") + 1);
             
-            Logger::Get().Trace("收到网络数据: ", msg);
+            Logger::Get().Debug("收到网络数据: ", msg);
 
             bool isReset = g_net.HandleClientMessage(msg, clientAddr);
             if (isReset) {
                 // 如果是新连接，清空缓存并强制触发一次发送
-                Logger::Get().Debug("检测到新客户端连接，重置缓存");
+                Logger::Get().Info("检测到新客户端连接，重置缓存");
                 g_cursorEngine->ResetCache();
 
                 std::lock_guard<std::mutex> lock(g_mutexCursor);
@@ -790,26 +790,26 @@ void NetworkThread() {
 int main() {
     Logger::Get().Info("======= 程序启动 =======");
     // 1. 高 DPI 设置
-    Logger::Get().Trace("设置进程DPI感知");
+    Logger::Get().Debug("设置进程DPI感知");
     SetProcessDpiAwareness(PROCESS_PER_MONITOR_DPI_AWARE);
 
     // 2. 初始化网络
-    Logger::Get().Trace("初始化网络管理器");
+    Logger::Get().Debug("初始化网络管理器");
     if (!g_net.Initialize()) {
         Logger::Get().Error("网络初始化失败");
         return 1;
     }
 
-    Logger::Get().Trace("创建光标引擎");
+    Logger::Get().Debug("创建光标引擎");
     g_cursorEngine = std::make_unique<CursorEngine>(g_net);
 
     // 3. 启动线程
-    Logger::Get().Trace("启动工作线程和网络线程");
+    Logger::Get().Info("启动工作线程和网络线程");
     std::thread tWorker(WorkerThread);
     std::thread tNet(NetworkThread);
 
     // 4. 安装钩子
-    Logger::Get().Trace("安装WinEvent钩子");
+    Logger::Get().Debug("安装WinEvent钩子");
     HWINEVENTHOOK hHook = SetWinEventHook(
         EVENT_OBJECT_NAMECHANGE, EVENT_OBJECT_NAMECHANGE,
         NULL, WinEventProc, 0, 0, WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS
@@ -823,7 +823,7 @@ int main() {
     Logger::Get().Info("系统初始化完成。按 Ctrl+C 退出（如果在控制台中）。");
     
     // 5. 消息循环 (Message Loop) - 必须存在以保持 Hook 活跃
-    Logger::Get().Trace("进入消息循环");
+    Logger::Get().Debug("进入消息循环");
     MSG msg;
     while (GetMessage(&msg, NULL, 0, 0)) {
         TranslateMessage(&msg);
