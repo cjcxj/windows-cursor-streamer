@@ -94,6 +94,11 @@ public:
          Log("[调试] ", args...);
     }
 
+    template<typename... Args>
+    void Trace(Args... args) {
+         Log("[跟踪] ", args...);
+    }
+
 private:
     template<typename... Args>
     void Log(const char* level, Args... args) {
@@ -178,12 +183,19 @@ public:
     NetworkManager() : m_socket(INVALID_SOCKET) {}
 
     bool Initialize() {
+        Logger::Get().Trace("开始初始化网络");
         WSADATA wsaData;
-        if (WSAStartup(MAKEWORD(2, 2), &wsaData) != 0) return false;
+        if (WSAStartup(MAKEWORD(2, 2), &wsaData) != 0) {
+            Logger::Get().Error("WSAStartup 失败");
+            return false;
+        }
 
         // IPv6 Dual Stack
         m_socket = socket(AF_INET6, SOCK_DGRAM, 0);
-        if (m_socket == INVALID_SOCKET) return false;
+        if (m_socket == INVALID_SOCKET) {
+            Logger::Get().Error("创建套接字失败");
+            return false;
+        }
 
         int no = 0;
         setsockopt(m_socket, IPPROTO_IPV6, IPV6_V6ONLY, (char*)&no, sizeof(no));
@@ -209,13 +221,16 @@ public:
         ioctlsocket(m_socket, FIONBIO, &mode);
 
         Logger::Get().Info("网络已在端口启动", LISTEN_PORT);
+        Logger::Get().Trace("网络初始化完成");
         return true;
     }
 
     void Shutdown() {
+        Logger::Get().Trace("开始关闭网络");
         m_running = false;
         if (m_socket != INVALID_SOCKET) closesocket(m_socket);
         WSACleanup();
+        Logger::Get().Trace("网络关闭完成");
     }
 
     // 返回值含义：
@@ -227,6 +242,8 @@ public:
         std::string ipKey(ipStr);
         std::string fullKey = ipKey + ":" + std::to_string(ntohs(clientAddr.sin6_port));
 
+        Logger::Get().Trace("处理客户端消息: ", msg, " 来自: ", fullKey);
+
         std::lock_guard<std::mutex> lock(m_clientsMutex);
 
         if (msg == "CURSOR_HELLO") {
@@ -236,6 +253,7 @@ public:
             if (m_clients.find(fullKey) == m_clients.end()) {
                 // 情况1：这是一个全新的客户端 (IP:Port 组合之前没有)
                 needsReset = true;
+                Logger::Get().Debug("检测到新客户端: ", fullKey);
 
                 // 清理来自同一 IP 但不同端口的旧连接 (重连逻辑)
                 auto it = m_clients.begin();
@@ -253,53 +271,80 @@ public:
                 }
 
                 Logger::Get().Info("新客户端已连接:", fullKey);
+            } else {
+                Logger::Get().Debug("已知客户端重新连接: ", fullKey);
             }
 
             // 无论如何，都更新活动时间
             m_clients[fullKey] = { clientAddr, std::chrono::steady_clock::now() };
 
+            Logger::Get().Trace("客户端消息处理完成，needsReset=", needsReset);
             return needsReset;
 
         } else if (msg == "KEEPALIVE") {
             if (m_clients.count(fullKey)) {
                 m_clients[fullKey].last_activity = std::chrono::steady_clock::now();
+                Logger::Get().Trace("更新客户端活动时间: ", fullKey);
+            } else {
+                Logger::Get().Debug("收到未知客户端的KEEPALIVE: ", fullKey);
             }
+        } else {
+            Logger::Get().Debug("收到未知消息: ", msg, " 来自: ", fullKey);
         }
         return false; // KEEPALIVE 或其他消息永远不触发重置
     }
 
     void BroadcastPacket(const std::vector<uint8_t>& packet) {
+        Logger::Get().Trace("开始广播数据包，大小: ", packet.size());
         std::lock_guard<std::mutex> lock(m_clientsMutex);
+        int count = 0;
         for (const auto& [key, client] : m_clients) {
-            sendto(m_socket, (const char*)packet.data(), (int)packet.size(), 0, (sockaddr*)&client.addr, sizeof(client.addr));
+            int result = sendto(m_socket, (const char*)packet.data(), (int)packet.size(), 0, (sockaddr*)&client.addr, sizeof(client.addr));
+            if (result == SOCKET_ERROR) {
+                Logger::Get().Debug("向客户端 ", key, " 发送数据失败");
+            } else {
+                count++;
+            }
         }
+        Logger::Get().Trace("数据包广播完成，成功发送给 ", count, " 个客户端");
     }
 
     void CleanUpTimeouts() {
+        Logger::Get().Trace("开始清理超时客户端");
         std::lock_guard<std::mutex> lock(m_clientsMutex);
         auto now = std::chrono::steady_clock::now();
         auto it = m_clients.begin();
+        int removed = 0;
         while (it != m_clients.end()) {
             std::chrono::duration<double> elapsed = now - it->second.last_activity;
             if (elapsed.count() > CLIENT_TIMEOUT_SEC) {
                 Logger::Get().Info("客户端超时:", it->first);
                 it = m_clients.erase(it);
+                removed++;
             } else {
                 ++it;
             }
         }
+        Logger::Get().Trace("超时客户端清理完成，移除了 ", removed, " 个客户端");
     }
 
     void SendHeartbeats() {
+        Logger::Get().Trace("发送心跳包");
         // 心跳包 (Type 2)
         uint8_t hb = 2;
         BroadcastPacket({ hb });
     }
 
-    SOCKET GetSocket() const { return m_socket; }
+    SOCKET GetSocket() const { 
+        Logger::Get().Trace("获取套接字句柄");
+        return m_socket; 
+    }
+    
     bool HasClients() {
         std::lock_guard<std::mutex> lock(m_clientsMutex);
-        return !m_clients.empty();
+        bool hasClients = !m_clients.empty();
+        Logger::Get().Trace("检查是否有客户端: ", hasClients, " 客户端数量: ", m_clients.size());
+        return hasClients;
     }
 };
 
@@ -320,10 +365,12 @@ class ImageCache {
 public:
     // 返回 true 如果是新的
     bool Add(uint32_t hash) {
+        Logger::Get().Trace("尝试添加哈希到缓存: ", hash);
         std::lock_guard<std::mutex> lock(m_lock);
         auto it = m_map.find(hash);
         if (it != m_map.end()) {
             // 已存在，移动到头部
+            Logger::Get().Trace("哈希已存在于缓存中，更新位置: ", hash);
             m_lruList.erase(it->second.lruIterator);
             m_lruList.push_front(hash);
             it->second.lruIterator = m_lruList.begin();
@@ -333,19 +380,28 @@ public:
         // 新项
         if (m_lruList.size() >= LRU_CACHE_SIZE) {
             uint32_t last = m_lruList.back();
+            Logger::Get().Trace("缓存已满，移除最旧项: ", last);
             m_lruList.pop_back();
             m_map.erase(last);
         }
 
         m_lruList.push_front(hash);
         m_map[hash] = { hash, m_lruList.begin() };
+        Logger::Get().Trace("添加新哈希到缓存: ", hash, " 当前缓存大小: ", m_lruList.size());
         return true;
     }
 
     void Clear() {
+        Logger::Get().Trace("清空缓存");
         std::lock_guard<std::mutex> lock(m_lock);
         m_map.clear();
         m_lruList.clear();
+        Logger::Get().Trace("缓存清空完成");
+    }
+    
+    size_t Size() const {
+        std::lock_guard<std::mutex> lock(const_cast<std::mutex&>(m_lock));
+        return m_lruList.size();
     }
 };
 
@@ -356,48 +412,72 @@ class CursorEngine {
 
     // COM IStream wrapper for GDI+ saving
     static int GetEncoderClsid(const WCHAR* format, CLSID* pClsid) {
+        Logger::Get().Trace("获取图像编码器CLSID");
         UINT  num = 0, size = 0;
         Gdiplus::GetImageEncodersSize(&num, &size);
-        if (size == 0) return -1;
+        if (size == 0) {
+            Logger::Get().Error("无法获取图像编码器大小");
+            return -1;
+        }
         std::vector<char> buffer(size);
         Gdiplus::ImageCodecInfo* pImageCodecInfo = (Gdiplus::ImageCodecInfo*)(buffer.data());
         Gdiplus::GetImageEncoders(num, size, pImageCodecInfo);
         for (UINT j = 0; j < num; ++j) {
             if (wcscmp(pImageCodecInfo[j].MimeType, format) == 0) {
                 *pClsid = pImageCodecInfo[j].Clsid;
+                Logger::Get().Trace("找到图像编码器");
                 return j;
             }
         }
+        Logger::Get().Error("未找到图像编码器");
         return -1;
     }
 
 public:
     CursorEngine(NetworkManager& net) : m_net(net), m_gdiplusToken(0) {
+        Logger::Get().Trace("初始化光标引擎");
         Gdiplus::GdiplusStartupInput gdiplusStartupInput;
         Gdiplus::GdiplusStartup(&m_gdiplusToken, &gdiplusStartupInput, NULL);
+        Logger::Get().Trace("光标引擎初始化完成");
     }
 
     ~CursorEngine() {
+        Logger::Get().Trace("销毁光标引擎");
         Gdiplus::GdiplusShutdown(m_gdiplusToken);
+        Logger::Get().Trace("光标引擎销毁完成");
     }
 
     void ResetCache() {
+        Logger::Get().Trace("重置光标缓存");
         m_cache.Clear();
     }
 
     void CaptureAndSend() {
+        Logger::Get().Trace("开始捕获和发送光标");
         // 1. 获取光标信息
         CURSORINFO ci = { 0 };
         ci.cbSize = sizeof(ci);
-        if (!GetCursorInfo(&ci)) return;
-        if (ci.flags == 0) return; // 光标隐藏
+        if (!GetCursorInfo(&ci)) {
+            Logger::Get().Debug("获取光标信息失败");
+            return;
+        }
+        if (ci.flags == 0) {
+            Logger::Get().Trace("光标隐藏，跳过处理");
+            return; // 光标隐藏
+        }
 
         HICON hIcon = CopyIcon(ci.hCursor);
-        if (!hIcon) return;
+        if (!hIcon) {
+            Logger::Get().Debug("复制光标图标失败");
+            return;
+        }
         ScopedIcon scopedIcon(hIcon);
 
         ICONINFO ii;
-        if (!GetIconInfo(hIcon, &ii)) return;
+        if (!GetIconInfo(hIcon, &ii)) {
+            Logger::Get().Debug("获取光标信息失败");
+            return;
+        }
         ScopedObject scopedMask(ii.hbmMask);
         ScopedObject scopedColor(ii.hbmColor);
 
@@ -414,6 +494,8 @@ public:
         // 限制尺寸
         if (w > 512) w = 512;
         if (h > 512) h = 512;
+        
+        Logger::Get().Trace("光标尺寸: ", w, "x", h);
 
         // 2. 准备黑白背景绘制 (模拟 Python 中的 NumPy 异或检测)
         // 创建内存 DC
@@ -459,7 +541,9 @@ public:
         std::vector<uint32_t> finalPixels(numPixels);
         std::vector<bool> xorMask(numPixels, false); // 用于记录XOR区域的掩码
 
+        Logger::Get().Trace("开始像素处理");
         // --- 第一遍：识别像素类型并生成基础图像 ---
+        int xorPixelCount = 0;
         for (int i = 0; i < numPixels; ++i) {
             uint8_t bb = (pxB[i] & 0xFF);
             uint8_t bg = ((pxB[i] >> 8) & 0xFF);
@@ -485,6 +569,7 @@ public:
             if (isXor) {
                 xorMask[i] = true;
                 finalPixels[i] = 0xFFFFFFFF; // ARGB: White, full alpha
+                xorPixelCount++;
             } else {
                 finalPixels[i] = (alpha << 24) | (br << 16) | (bg << 8) | bb;
             }
@@ -492,6 +577,7 @@ public:
 
         // --- 第二遍：为 XOR 区域添加黑色轮廓 (模拟膨胀) ---
         std::vector<uint32_t> outlinedPixels = finalPixels; // 复制一份用于修改
+        int outlinePixelCount = 0;
         for (int y = 0; y < h; ++y) {
             for (int x = 0; x < w; ++x) {
                 int idx = y * w + x;
@@ -507,12 +593,16 @@ public:
                     if (neighborIsXor) {
                         // 将这个邻居像素强制设为不透明的黑色
                         outlinedPixels[idx] = 0xFF000000; // ARGB: Black, full alpha
+                        outlinePixelCount++;
                     }
                 }
             }
         }
 
+        Logger::Get().Trace("像素处理完成，XOR像素数: ", xorPixelCount, " 轮廓像素数: ", outlinePixelCount);
+
         // 4. 使用 GDI+ 生成 PNG (使用添加了轮廓的像素数据)
+        Logger::Get().Trace("创建GDI+位图");
         Gdiplus::Bitmap gdiBitmap(w, h, PixelFormat32bppARGB);
         Gdiplus::BitmapData data;
         Gdiplus::Rect rect(0, 0, w, h);
@@ -523,10 +613,14 @@ public:
         gdiBitmap.UnlockBits(&data);
 
         IStream* pStream = NULL;
-        if (CreateStreamOnHGlobal(NULL, TRUE, &pStream) != S_OK) return;
+        if (CreateStreamOnHGlobal(NULL, TRUE, &pStream) != S_OK) {
+            Logger::Get().Error("创建内存流失败");
+            return;
+        }
 
         CLSID pngClsid;
         GetEncoderClsid(L"image/png", &pngClsid);
+        Logger::Get().Trace("保存PNG图像");
         gdiBitmap.Save(pStream, &pngClsid, NULL);
 
         // 获取 PNG 数据
@@ -540,8 +634,11 @@ public:
         pStream->Read(pngData.data(), pngData.size(), &bytesRead);
         pStream->Release();
 
+        Logger::Get().Trace("PNG数据大小: ", pngData.size());
+
         // 5. 缓存与发送
         uint32_t hash = CalculateCRC32(pngData);
+        Logger::Get().Trace("计算PNG数据哈希: ", hash);
         bool isNew = m_cache.Add(hash);
 
         // Packet Structure:
@@ -565,10 +662,13 @@ public:
 
         if (isNew) {
             packet.insert(packet.end(), pngData.begin(), pngData.end());
-            Logger::Get().Debug("发送了新的光标图像，大小:", pngData.size());
+            Logger::Get().Debug("发送了新的光标图像，大小:", pngData.size(), " 哈希:", hash);
+        } else {
+            Logger::Get().Trace("发送缓存的光标图像，哈希:", hash);
         }
 
         m_net.BroadcastPacket(packet);
+        Logger::Get().Trace("捕获和发送光标完成");
     }
 };
 
@@ -590,6 +690,7 @@ void CALLBACK WinEventProc(HWINEVENTHOOK hWinEventHook, DWORD event, HWND hwnd,
                           LONG idObject, LONG idChild, DWORD dwEventThread, DWORD dwmsEventTime)
 {
     if (idObject == OBJID_CURSOR) {
+        Logger::Get().Trace("收到光标变化事件");
         // 通知工作线程
         std::lock_guard<std::mutex> lock(g_mutexCursor);
         g_cursorChanged = true;
@@ -603,15 +704,23 @@ void WorkerThread() {
     while (!g_shouldExit) {
         {
             std::unique_lock<std::mutex> lock(g_mutexCursor);
+            Logger::Get().Trace("工作线程等待光标变化");
             g_cvCursorChanged.wait(lock, [] { return g_cursorChanged || g_shouldExit; });
-            if (g_shouldExit) break;
+            if (g_shouldExit) {
+                Logger::Get().Trace("工作线程收到退出信号");
+                break;
+            }
             g_cursorChanged = false;
+            Logger::Get().Trace("工作线程被唤醒，开始处理光标变化");
         }
 
         if (g_net.HasClients()) {
             g_cursorEngine->CaptureAndSend();
+        } else {
+            Logger::Get().Trace("没有客户端连接，跳过光标处理");
         }
     }
+    Logger::Get().Info("工作线程已结束。");
 }
 
 // 网络接收线程
@@ -626,6 +735,7 @@ void NetworkThread() {
 
     while (!g_shouldExit) {
         // 1. 处理传入数据
+        Logger::Get().Trace("等待网络数据");
         int received = recvfrom(g_net.GetSocket(), buffer, sizeof(buffer) - 1, 0, (sockaddr*)&clientAddr, &addrLen);
 
         if (received > 0) {
@@ -634,10 +744,13 @@ void NetworkThread() {
 
             // 简单的 trim
             msg.erase(msg.find_last_not_of(" \n\r\t") + 1);
+            
+            Logger::Get().Trace("收到网络数据: ", msg);
 
             bool isReset = g_net.HandleClientMessage(msg, clientAddr);
             if (isReset) {
                 // 如果是新连接，清空缓存并强制触发一次发送
+                Logger::Get().Debug("检测到新客户端连接，重置缓存");
                 g_cursorEngine->ResetCache();
 
                 std::lock_guard<std::mutex> lock(g_mutexCursor);
@@ -649,6 +762,7 @@ void NetworkThread() {
             int err = WSAGetLastError();
             if (err != WSAEWOULDBLOCK) {
                 // Ignore ConnReset usually, handled by IOCTL but good to know
+                Logger::Get().Debug("网络接收错误: ", err);
             }
         }
 
@@ -670,24 +784,32 @@ void NetworkThread() {
 
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
+    Logger::Get().Info("网络线程已结束。");
 }
 
 int main() {
+    Logger::Get().Info("======= 程序启动 =======");
     // 1. 高 DPI 设置
+    Logger::Get().Trace("设置进程DPI感知");
     SetProcessDpiAwareness(PROCESS_PER_MONITOR_DPI_AWARE);
 
     // 2. 初始化网络
+    Logger::Get().Trace("初始化网络管理器");
     if (!g_net.Initialize()) {
+        Logger::Get().Error("网络初始化失败");
         return 1;
     }
 
+    Logger::Get().Trace("创建光标引擎");
     g_cursorEngine = std::make_unique<CursorEngine>(g_net);
 
     // 3. 启动线程
+    Logger::Get().Trace("启动工作线程和网络线程");
     std::thread tWorker(WorkerThread);
     std::thread tNet(NetworkThread);
 
     // 4. 安装钩子
+    Logger::Get().Trace("安装WinEvent钩子");
     HWINEVENTHOOK hHook = SetWinEventHook(
         EVENT_OBJECT_NAMECHANGE, EVENT_OBJECT_NAMECHANGE,
         NULL, WinEventProc, 0, 0, WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS
@@ -701,6 +823,7 @@ int main() {
     Logger::Get().Info("系统初始化完成。按 Ctrl+C 退出（如果在控制台中）。");
     
     // 5. 消息循环 (Message Loop) - 必须存在以保持 Hook 活跃
+    Logger::Get().Trace("进入消息循环");
     MSG msg;
     while (GetMessage(&msg, NULL, 0, 0)) {
         TranslateMessage(&msg);
@@ -718,5 +841,6 @@ int main() {
     UnhookWinEvent(hHook);
     g_net.Shutdown();
     
+    Logger::Get().Info("======= 程序退出 =======");
     return 0;
 }
