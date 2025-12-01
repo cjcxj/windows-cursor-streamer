@@ -336,7 +336,6 @@ public:
     }
 
     SOCKET GetSocket() const { 
-        Logger::Get().Trace("获取套接字句柄");
         return m_socket; 
     }
     
@@ -735,7 +734,6 @@ void NetworkThread() {
 
     while (!g_shouldExit) {
         // 1. 处理传入数据
-        Logger::Get().Debug("等待网络数据");
         int received = recvfrom(g_net.GetSocket(), buffer, sizeof(buffer) - 1, 0, (sockaddr*)&clientAddr, &addrLen);
 
         if (received > 0) {
