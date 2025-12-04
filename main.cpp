@@ -72,7 +72,7 @@ public:
         return instance;
     }
 
-    Logger() : m_level(LogLevel::DEBUG) {
+    Logger() : m_level(LogLevel::INFO) {
         // 以追加模式打开日志文件
         m_file.open("cursor_monitor.log", std::ios::app);
         
@@ -180,6 +180,11 @@ struct ScopedIcon {
     ~ScopedIcon() { if (handle) DestroyIcon(handle); }
 };
 
+// 并发控制全局变量
+std::condition_variable g_cvCursorChanged;
+std::mutex g_mutexCursor;
+bool g_cursorChanged = false;
+
 // ==========================================
 //           3. 网络管理 (TCP)
 // ==========================================
@@ -277,14 +282,28 @@ public:
                 auto session = std::make_shared<ClientSession>();
                 session->socket = clientSock;
                 session->connected = true;
-                session->lastSentHash = 0; // 初始为0，确保新连接一定会收到一次全量包
+                session->lastSentHash = 0; // 初始为0
 
                 char ipStr[INET6_ADDRSTRLEN];
                 inet_ntop(AF_INET6, &clientAddr.sin6_addr, ipStr, INET6_ADDRSTRLEN);
                 Logger::Get().Info("新客户端连接:", ipStr);
 
-                std::lock_guard<std::mutex> lock(m_clientsMutex);
-                m_clients.push_back(session);
+                {
+                    std::lock_guard<std::mutex> lock(m_clientsMutex);
+                    m_clients.push_back(session);
+                }
+
+                // ==============================================
+                // 连接建立后，立即触发一次光标捕获和发送
+                // ==============================================
+                {
+                    std::lock_guard<std::mutex> lock(g_mutexCursor);
+                    g_cursorChanged = true;
+                }
+                g_cvCursorChanged.notify_one(); 
+                // 这会唤醒 WorkerThread，它会调用 CaptureAndSend
+                // CaptureAndSend 会发现新客户端的 lastSentHash(0) != CurrentHash
+                // 从而立即发送当前光标给新客户端
             }
         }
         Logger::Get().Info("AcceptLoop 退出");
@@ -509,7 +528,7 @@ public:
         }
 
         // ==========================================
-        //         新逻辑 (TCP + 服务端缓存优化)
+        //          (TCP + 服务端缓存优化)
         // ==========================================
 
         // 4. 计算内容哈希 (用于内部去重和缓存)
@@ -567,9 +586,7 @@ NetworkManager g_net;
 std::unique_ptr<CursorEngine> g_cursorEngine;
 
 // 并发控制
-std::condition_variable g_cvCursorChanged;
-std::mutex g_mutexCursor;
-bool g_cursorChanged = false;
+
 bool g_shouldExit = false;
 
 // 钩子回调
