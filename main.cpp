@@ -388,6 +388,13 @@ class CursorEngine {
     ULONG_PTR m_gdiplusToken;
     NetworkManager& m_net;
 
+    // 缓存上一帧的光标状态，用于轮询优化
+    HCURSOR mLastCursor = NULL;
+    uint32_t mLastHash = 0;
+    std::vector<uint8_t> mLastPngData;
+    int32_t mLastHotX = 0;
+    int32_t mLastHotY = 0;
+
     // COM IStream wrapper for GDI+ saving
     static int GetEncoderClsid(const WCHAR* format, CLSID* pClsid) {
         UINT  num = 0, size = 0;
@@ -423,6 +430,15 @@ public:
         ci.cbSize = sizeof(ci);
         if (!GetCursorInfo(&ci)) return;
         if (ci.flags == 0) return; // 光标隐藏
+
+        // 优化：如果光标句柄没有变化，直接使用缓存的数据广播
+        // 这对于轮询模式至关重要，可以避免重复的高昂图像处理开销
+        if (ci.hCursor == mLastCursor && mLastCursor != NULL && !mLastPngData.empty()) {
+            // 即使光标没变，也调用广播，因为可能有新连接的客户端需要接收当前光标
+            // BroadcastCursor 内部会根据 lastSentHash 自动去重，不会造成带宽浪费
+            m_net.BroadcastCursor(mLastHash, mLastHotX, mLastHotY, mLastPngData);
+            return;
+        }
 
         HICON hIcon = CopyIcon(ci.hCursor);
         if (!hIcon) return;
@@ -573,6 +589,13 @@ public:
 
         // 6. 广播 (智能发送)
         if (!pngToSend.empty()) {
+            // 更新缓存
+            mLastCursor = ci.hCursor;
+            mLastHash = contentHash;
+            mLastPngData = pngToSend;
+            mLastHotX = ii.xHotspot;
+            mLastHotY = ii.yHotspot;
+
             m_net.BroadcastCursor(contentHash, ii.xHotspot, ii.yHotspot, pngToSend);
         }
     }
@@ -607,11 +630,20 @@ void WorkerThread() {
     while (!g_shouldExit) {
         {
             std::unique_lock<std::mutex> lock(g_mutexCursor);
-            g_cvCursorChanged.wait(lock, [] { return g_cursorChanged || g_shouldExit; });
+            // 修改：使用 wait_for 进行超时等待，实现 33ms (约30fps) 的轮询兜底
+            // 这样即使系统没有触发光标改变事件（某些应用不触发事件），我们也能主动捕获到变化
+            bool notified = g_cvCursorChanged.wait_for(lock, std::chrono::milliseconds(33), [] { return g_cursorChanged || g_shouldExit; });
+            
             if (g_shouldExit) break;
-            g_cursorChanged = false;
+            
+            if (notified) {
+                // 如果是被事件唤醒的，消耗掉这个标志位
+                g_cursorChanged = false;
+            }
         }
 
+        // 无论是事件触发还是超时轮询，都执行一次捕获检查
+        // CaptureAndSend 内部有完善的哈希去重机制，如果光标实际上没变，不会发送任何网络数据
         g_cursorEngine->CaptureAndSend();
     }
     Logger::Get().Info("工作线程已结束");
