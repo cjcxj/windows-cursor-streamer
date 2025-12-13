@@ -44,13 +44,13 @@
 #include <fstream>
 
 // 3. 链接库
-#pragma comment (lib, "ws2_32.lib")
-#pragma comment (lib, "gdi32.lib")
-#pragma comment (lib, "user32.lib")
-#pragma comment (lib, "gdiplus.lib")
-#pragma comment (lib, "shcore.lib")
-#pragma comment (lib, "ole32.lib")
-#pragma comment (lib, "advapi32.lib") 
+#pragma comment(lib, "ws2_32.lib")
+#pragma comment(lib, "gdi32.lib")
+#pragma comment(lib, "user32.lib")
+#pragma comment(lib, "gdiplus.lib")
+#pragma comment(lib, "shcore.lib")
+#pragma comment(lib, "ole32.lib")
+#pragma comment(lib, "advapi32.lib")
 
 // ==========================================
 //           1. 配置
@@ -62,49 +62,90 @@ const int LISTEN_PORT = 5005;
 //           2. 日志系统
 // ==========================================
 
-enum class LogLevel { TRACE, DEBUG, INFO, LOG_ERROR };
+enum class LogLevel
+{
+    TRACE,
+    DEBUG,
+    INFO,
+    LOG_ERROR
+};
 
-class Logger {
+class Logger
+{
     std::mutex m_mutex;
     std::ofstream m_file;
     LogLevel m_level;
-public:
-    static Logger& Get() { static Logger instance; return instance; }
 
-    Logger() : m_level(LogLevel::INFO) {
+public:
+    static Logger &Get()
+    {
+        static Logger instance;
+        return instance;
+    }
+
+    Logger() : m_level(LogLevel::INFO)
+    {
         m_file.open("cursor_monitor.log", std::ios::app);
-        char* envLevel = nullptr; size_t len = 0;
+        char *envLevel = nullptr;
+        size_t len = 0;
         _dupenv_s(&envLevel, &len, "CURSOR_LOG_LEVEL");
-        if (envLevel) {
+        if (envLevel)
+        {
             std::string l(envLevel);
-            if (l == "TRACE") m_level = LogLevel::TRACE;
-            else if (l == "DEBUG") m_level = LogLevel::DEBUG;
-            else if (l == "INFO") m_level = LogLevel::INFO;
-            else if (l == "ERROR") m_level = LogLevel::LOG_ERROR;
+            if (l == "TRACE")
+                m_level = LogLevel::TRACE;
+            else if (l == "DEBUG")
+                m_level = LogLevel::DEBUG;
+            else if (l == "INFO")
+                m_level = LogLevel::INFO;
+            else if (l == "ERROR")
+                m_level = LogLevel::LOG_ERROR;
             free(envLevel);
         }
     }
-    ~Logger() { if (m_file.is_open()) m_file.close(); }
+    ~Logger()
+    {
+        if (m_file.is_open())
+            m_file.close();
+    }
     void SetLogLevel(LogLevel l) { m_level = l; }
 
-    template<typename... Args> void Info(Args... args) { if(m_level<=LogLevel::INFO) Log("[INFO] ", args...); }
-    template<typename... Args> void Error(Args... args) { if(m_level<=LogLevel::LOG_ERROR) Log("[ERROR] ", args...); }
-    template<typename... Args> void Debug(Args... args) { if(m_level<=LogLevel::DEBUG) Log("[DEBUG] ", args...); }
+    template <typename... Args>
+    void Info(Args... args)
+    {
+        if (m_level <= LogLevel::INFO)
+            Log("[INFO] ", args...);
+    }
+    template <typename... Args>
+    void Error(Args... args)
+    {
+        if (m_level <= LogLevel::LOG_ERROR)
+            Log("[ERROR] ", args...);
+    }
+    template <typename... Args>
+    void Debug(Args... args)
+    {
+        if (m_level <= LogLevel::DEBUG)
+            Log("[DEBUG] ", args...);
+    }
 
 private:
-    template<typename... Args>
-    void Log(const char* prefix, Args... args) {
+    template <typename... Args>
+    void Log(const char *prefix, Args... args)
+    {
         std::lock_guard<std::mutex> lock(m_mutex);
         auto now = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
-        std::tm tm_now; localtime_s(&tm_now, &now);
-        
+        std::tm tm_now;
+        localtime_s(&tm_now, &now);
+
         // 控制台输出
         std::cout << std::put_time(&tm_now, "%H:%M:%S ") << prefix;
         ((std::cout << args << " "), ...);
         std::cout << std::endl;
 
         // 文件输出
-        if (m_file.is_open()) {
+        if (m_file.is_open())
+        {
             m_file << std::put_time(&tm_now, "%Y-%m-%d %H:%M:%S ") << prefix;
             ((m_file << args << " "), ...);
             m_file << std::endl;
@@ -112,18 +153,32 @@ private:
     }
 };
 
-uint32_t CalculateCRC32(const std::vector<uint8_t>& data) {
+uint32_t CalculateCRC32(const std::vector<uint8_t> &data)
+{
     uint32_t crc = 0xFFFFFFFF;
-    for (uint8_t byte : data) {
+    for (uint8_t byte : data)
+    {
         crc ^= byte;
-        for (int i = 0; i < 8; i++) crc = (crc & 1) ? (crc >> 1) ^ 0xEDB88320 : crc >> 1;
+        for (int i = 0; i < 8; i++)
+            crc = (crc & 1) ? (crc >> 1) ^ 0xEDB88320 : crc >> 1;
     }
     return ~crc;
 }
 
 // RAII 资源管理
-struct ScopedMemDC { HDC hdc; ScopedMemDC(HDC c) : hdc(CreateCompatibleDC(c)) {} ~ScopedMemDC() { DeleteDC(hdc); } operator HDC() { return hdc; } };
-struct ScopedObject { HGDIOBJ h; ScopedObject(HGDIOBJ o) : h(o) {} ~ScopedObject() { DeleteObject(h); } };
+struct ScopedMemDC
+{
+    HDC hdc;
+    ScopedMemDC(HDC c) : hdc(CreateCompatibleDC(c)) {}
+    ~ScopedMemDC() { DeleteDC(hdc); }
+    operator HDC() { return hdc; }
+};
+struct ScopedObject
+{
+    HGDIOBJ h;
+    ScopedObject(HGDIOBJ o) : h(o) {}
+    ~ScopedObject() { DeleteObject(h); }
+};
 
 // 全局同步信号
 std::condition_variable g_cvCursorChanged;
@@ -135,85 +190,99 @@ bool g_cursorChanged = false;
 // ==========================================
 
 // 客户端会话结构
-struct ClientSession {
+struct ClientSession
+{
     SOCKET socket;
     bool connected;
     uint32_t lastSentHash; // 上一次发送的 Hash (用于连续帧去重)
-    
+
     // 记录该客户端已经接收并缓存过的光标 Hash ID
     // 服务端通过查询这个集合，决定是发图片还是只发 ID
-    std::unordered_set<uint32_t> cachedHashes; 
+    std::unordered_set<uint32_t> cachedHashes;
 };
 
-class NetworkManager {
+class NetworkManager
+{
     SOCKET m_listenSocket;
     std::list<std::shared_ptr<ClientSession>> m_clients; // 客户端列表
     std::mutex m_clientsMutex;
-    
+
     // 服务端全局 PNG 缓存 (用于 CursorEngine 避免重复压缩)
     std::map<uint32_t, std::vector<uint8_t>> m_cache;
     std::mutex m_cacheMutex;
-    
-    std::atomic<bool> m_running{ true };
+
+    std::atomic<bool> m_running{true};
 
 public:
     NetworkManager() : m_listenSocket(INVALID_SOCKET) {}
 
     // 1. 初始化 TCP 服务端
-    bool Initialize() {
+    bool Initialize()
+    {
         WSADATA wsaData;
-        if (WSAStartup(MAKEWORD(2, 2), &wsaData) != 0) return false;
+        if (WSAStartup(MAKEWORD(2, 2), &wsaData) != 0)
+            return false;
 
         m_listenSocket = socket(AF_INET6, SOCK_STREAM, IPPROTO_TCP);
-        if (m_listenSocket == INVALID_SOCKET) return false;
+        if (m_listenSocket == INVALID_SOCKET)
+            return false;
 
         int no = 0;
         int yes = 1;
         // 允许 IPv4 和 IPv6 双栈
-        setsockopt(m_listenSocket, IPPROTO_IPV6, IPV6_V6ONLY, (char*)&no, sizeof(no));
+        setsockopt(m_listenSocket, IPPROTO_IPV6, IPV6_V6ONLY, (char *)&no, sizeof(no));
         // 允许端口重用 (快速重启)
-        setsockopt(m_listenSocket, SOL_SOCKET, SO_REUSEADDR, (char*)&yes, sizeof(yes));
+        setsockopt(m_listenSocket, SOL_SOCKET, SO_REUSEADDR, (char *)&yes, sizeof(yes));
 
         sockaddr_in6 addr = {};
         addr.sin6_family = AF_INET6;
         addr.sin6_port = htons(LISTEN_PORT); // 端口 5005
         addr.sin6_addr = in6addr_any;
 
-        if (bind(m_listenSocket, (sockaddr*)&addr, sizeof(addr)) == SOCKET_ERROR) return false;
-        if (listen(m_listenSocket, SOMAXCONN) == SOCKET_ERROR) return false;
+        if (bind(m_listenSocket, (sockaddr *)&addr, sizeof(addr)) == SOCKET_ERROR)
+            return false;
+        if (listen(m_listenSocket, SOMAXCONN) == SOCKET_ERROR)
+            return false;
 
         Logger::Get().Info("TCP 服务端已启动，端口:", LISTEN_PORT);
         return true;
     }
 
     // 2. 关闭与清理
-    void Shutdown() {
+    void Shutdown()
+    {
         m_running = false;
-        if (m_listenSocket != INVALID_SOCKET) {
+        if (m_listenSocket != INVALID_SOCKET)
+        {
             closesocket(m_listenSocket);
             m_listenSocket = INVALID_SOCKET;
         }
-        
+
         std::lock_guard<std::mutex> lock(m_clientsMutex);
-        for (auto& client : m_clients) {
-            if (client->socket != INVALID_SOCKET) closesocket(client->socket);
+        for (auto &client : m_clients)
+        {
+            if (client->socket != INVALID_SOCKET)
+                closesocket(client->socket);
         }
         m_clients.clear();
         WSACleanup();
     }
 
     // 3. 接受连接循环 (需在独立线程运行)
-    void AcceptLoop() {
+    void AcceptLoop()
+    {
         Logger::Get().Info("开始等待客户端连接...");
-        while (m_running) {
+        while (m_running)
+        {
             sockaddr_in6 clientAddr;
             int len = sizeof(clientAddr);
-            SOCKET clientSock = accept(m_listenSocket, (sockaddr*)&clientAddr, &len);
-            
-            if (clientSock != INVALID_SOCKET) {
+            SOCKET clientSock = accept(m_listenSocket, (sockaddr *)&clientAddr, &len);
+
+            if (clientSock != INVALID_SOCKET)
+            {
                 // 禁用 Nagle 算法，确保极低延迟
                 int yes = 1;
-                setsockopt(clientSock, IPPROTO_TCP, TCP_NODELAY, (char*)&yes, sizeof(yes));
+                setsockopt(clientSock, IPPROTO_TCP, TCP_NODELAY, (char *)&yes, sizeof(yes));
 
                 auto session = std::make_shared<ClientSession>();
                 session->socket = clientSock;
@@ -241,28 +310,33 @@ public:
     }
 
     // 4. 服务端内部 PNG 缓存 (避免重复 GDI+ 压缩)
-    bool GetCachedPng(uint32_t hash, std::vector<uint8_t>& outPng) {
+    bool GetCachedPng(uint32_t hash, std::vector<uint8_t> &outPng)
+    {
         std::lock_guard<std::mutex> lock(m_cacheMutex);
         auto it = m_cache.find(hash);
-        if (it != m_cache.end()) {
+        if (it != m_cache.end())
+        {
             outPng = it->second;
             return true;
         }
         return false;
     }
 
-    void CachePng(uint32_t hash, const std::vector<uint8_t>& pngData) {
+    void CachePng(uint32_t hash, const std::vector<uint8_t> &pngData)
+    {
         std::lock_guard<std::mutex> lock(m_cacheMutex);
-        if (m_cache.size() > 50) m_cache.clear(); // 简单清理
+        if (m_cache.size() > 50)
+            m_cache.clear(); // 简单清理
         m_cache[hash] = pngData;
     }
 
     // 5. 核心广播函数 (支持缓存协议)
-    void BroadcastCursor(uint32_t hash, int32_t hotX, int32_t hotY, int32_t frames, int32_t delay, const std::vector<uint8_t>& pngData) {
+    void BroadcastCursor(uint32_t hash, int32_t hotX, int32_t hotY, int32_t frames, int32_t delay, const std::vector<uint8_t> &pngData)
+    {
         std::lock_guard<std::mutex> lock(m_clientsMutex);
-        
+
         // --- 预构建数据包 ---
-        
+
         // Header 部分 (20 字节)
         // [Hash(4)] [HotX(4)] [HotY(4)] [Frames(4)] [Delay(4)]
         const uint32_t HEADER_SIZE = 20;
@@ -272,13 +346,19 @@ public:
         uint32_t fullBodySize = HEADER_SIZE + (uint32_t)pngData.size();
         std::vector<uint8_t> fullPacket(4 + fullBodySize);
         {
-            uint8_t* p = fullPacket.data();
-            memcpy(p, &fullBodySize, 4); p += 4; // BodyLen
-            memcpy(p, &hash, 4);         p += 4; // Hash
-            memcpy(p, &hotX, 4);         p += 4; // HotX
-            memcpy(p, &hotY, 4);         p += 4; // HotY
-            memcpy(p, &frames, 4);       p += 4; // Frames
-            memcpy(p, &delay, 4);        p += 4; // Delay
+            uint8_t *p = fullPacket.data();
+            memcpy(p, &fullBodySize, 4);
+            p += 4; // BodyLen
+            memcpy(p, &hash, 4);
+            p += 4; // Hash
+            memcpy(p, &hotX, 4);
+            p += 4; // HotX
+            memcpy(p, &hotY, 4);
+            p += 4; // HotY
+            memcpy(p, &frames, 4);
+            p += 4; // Frames
+            memcpy(p, &delay, 4);
+            p += 4;                                    // Delay
             memcpy(p, pngData.data(), pngData.size()); // PNG
         }
 
@@ -287,65 +367,83 @@ public:
         uint32_t cachedBodySize = HEADER_SIZE;
         std::vector<uint8_t> cachedPacket(4 + cachedBodySize);
         {
-            uint8_t* p = cachedPacket.data();
-            memcpy(p, &cachedBodySize, 4); p += 4; // BodyLen
-            memcpy(p, &hash, 4);           p += 4; // Hash
-            memcpy(p, &hotX, 4);           p += 4; // ...
-            memcpy(p, &hotY, 4);           p += 4;
-            memcpy(p, &frames, 4);         p += 4;
+            uint8_t *p = cachedPacket.data();
+            memcpy(p, &cachedBodySize, 4);
+            p += 4; // BodyLen
+            memcpy(p, &hash, 4);
+            p += 4; // Hash
+            memcpy(p, &hotX, 4);
+            p += 4; // ...
+            memcpy(p, &hotY, 4);
+            p += 4;
+            memcpy(p, &frames, 4);
+            p += 4;
             memcpy(p, &delay, 4);
         }
 
         // --- 遍历发送 ---
-        for (auto it = m_clients.begin(); it != m_clients.end(); ) {
-            auto& client = *it;
-            
-            if (!client->connected) {
+        for (auto it = m_clients.begin(); it != m_clients.end();)
+        {
+            auto &client = *it;
+
+            if (!client->connected)
+            {
                 it = m_clients.erase(it);
                 continue;
             }
 
             // 1. 连续去重：如果该客户端刚刚才发过这个光标，跳过
-            if (client->lastSentHash == hash) {
+            if (client->lastSentHash == hash)
+            {
                 ++it;
                 continue;
             }
 
             // 2. 缓存检查
-            const std::vector<uint8_t>* pPacketToSend = nullptr;
+            const std::vector<uint8_t> *pPacketToSend = nullptr;
             bool isCacheHit = false;
 
-            if (client->cachedHashes.find(hash) != client->cachedHashes.end()) {
+            if (client->cachedHashes.find(hash) != client->cachedHashes.end())
+            {
                 // 命中缓存：只发头信息
                 pPacketToSend = &cachedPacket;
                 isCacheHit = true;
-            } else {
+            }
+            else
+            {
                 // 未命中：发全量数据
                 pPacketToSend = &fullPacket;
-                
+
                 // 记录该客户端已拥有此 Hash
                 client->cachedHashes.insert(hash);
                 // 防止长时间运行内存膨胀 (保留最近的 100 个光标足够用了)
-                if (client->cachedHashes.size() > 100) {
+                if (client->cachedHashes.size() > 100)
+                {
                     client->cachedHashes.clear();
                     // 清空后，下次遇到旧光标会重新发送一次全量包，这是安全的
                 }
             }
 
             // 3. 执行发送
-            int sentBytes = send(client->socket, (const char*)pPacketToSend->data(), (int)pPacketToSend->size(), 0);
+            int sentBytes = send(client->socket, (const char *)pPacketToSend->data(), (int)pPacketToSend->size(), 0);
 
-            if (sentBytes == SOCKET_ERROR) {
+            if (sentBytes == SOCKET_ERROR)
+            {
                 Logger::Get().Info("客户端断开连接");
                 closesocket(client->socket);
                 client->connected = false;
                 it = m_clients.erase(it);
                 continue;
-            } else {
+            }
+            else
+            {
                 client->lastSentHash = hash;
-                if (isCacheHit) {
+                if (isCacheHit)
+                {
                     Logger::Get().Debug("客户端缓存命中 (24B) -> Hash:", hash);
-                } else {
+                }
+                else
+                {
                     Logger::Get().Debug("发送完整数据 (", pPacketToSend->size(), "B) -> Hash:", hash);
                 }
             }
@@ -359,7 +457,7 @@ public:
 // ==========================================
 
 // user32.dll 未公开 API 定义
-typedef BOOL(WINAPI* GETCURSORFRAMEINFO)(HCURSOR, DWORD, DWORD, DWORD*, DWORD*);
+typedef BOOL(WINAPI *GETCURSORFRAMEINFO)(HCURSOR, DWORD, DWORD, DWORD *, DWORD *);
 
 // ==========================================
 //           4. 光标引擎 (高性能优化版)
@@ -369,9 +467,10 @@ typedef BOOL(WINAPI* GETCURSORFRAMEINFO)(HCURSOR, DWORD, DWORD, DWORD*, DWORD*);
 // 2. 严格去重：句柄不变时，完全不执行任何逻辑
 // 3. 频率限制：强制最小间隔，防止高频抖动
 
-class CursorEngine {
+class CursorEngine
+{
     ULONG_PTR m_token;
-    NetworkManager& m_net;
+    NetworkManager &m_net;
     HMODULE m_hUser32;
     GETCURSORFRAMEINFO m_pGetCursorFrameInfo;
 
@@ -386,24 +485,35 @@ class CursorEngine {
     HBITMAP m_hBmpW = NULL;
     HGDIOBJ m_hOldB = NULL;
     HGDIOBJ m_hOldW = NULL;
-    void* m_pBitsB = NULL;
-    void* m_pBitsW = NULL;
+    void *m_pBitsB = NULL;
+    void *m_pBitsW = NULL;
     int m_cachedWidth = 0;
     int m_cachedHeight = 0; // 单帧高度
 
-    static int GetEncoderClsid(const WCHAR* format, CLSID* pClsid) {
-        UINT num, size; Gdiplus::GetImageEncodersSize(&num, &size);
-        if(size==0) return -1;
-        std::vector<char> buf(size); Gdiplus::ImageCodecInfo* p = (Gdiplus::ImageCodecInfo*)buf.data();
+    static int GetEncoderClsid(const WCHAR *format, CLSID *pClsid)
+    {
+        UINT num, size;
+        Gdiplus::GetImageEncodersSize(&num, &size);
+        if (size == 0)
+            return -1;
+        std::vector<char> buf(size);
+        Gdiplus::ImageCodecInfo *p = (Gdiplus::ImageCodecInfo *)buf.data();
         Gdiplus::GetImageEncoders(num, size, p);
-        for(UINT j=0; j<num; ++j) if(wcscmp(p[j].MimeType, format)==0) { *pClsid=p[j].Clsid; return j; }
+        for (UINT j = 0; j < num; ++j)
+            if (wcscmp(p[j].MimeType, format) == 0)
+            {
+                *pClsid = p[j].Clsid;
+                return j;
+            }
         return -1;
     }
 
     // 重新初始化 GDI 资源 (仅当尺寸变化时调用)
-    bool RecreateResources(int w, int hTotal) {
+    bool RecreateResources(int w, int hTotal)
+    {
         // 如果尺寸没变且资源存在，直接复用
-        if (m_hMemDC && m_hBmpB && m_hBmpW && w == m_cachedWidth && hTotal == m_cachedHeight) {
+        if (m_hMemDC && m_hBmpB && m_hBmpW && w == m_cachedWidth && hTotal == m_cachedHeight)
+        {
             return true;
         }
 
@@ -413,7 +523,8 @@ class CursorEngine {
         m_hMemDC = CreateCompatibleDC(hScreen);
         ReleaseDC(NULL, hScreen);
 
-        if (!m_hMemDC) return false;
+        if (!m_hMemDC)
+            return false;
 
         BITMAPINFOHEADER bi = {sizeof(bi)};
         bi.biWidth = w;
@@ -422,10 +533,11 @@ class CursorEngine {
         bi.biBitCount = 32;
         bi.biCompression = BI_RGB;
 
-        m_hBmpB = CreateDIBSection(m_hMemDC, (BITMAPINFO*)&bi, DIB_RGB_COLORS, &m_pBitsB, NULL, 0);
-        m_hBmpW = CreateDIBSection(m_hMemDC, (BITMAPINFO*)&bi, DIB_RGB_COLORS, &m_pBitsW, NULL, 0);
+        m_hBmpB = CreateDIBSection(m_hMemDC, (BITMAPINFO *)&bi, DIB_RGB_COLORS, &m_pBitsB, NULL, 0);
+        m_hBmpW = CreateDIBSection(m_hMemDC, (BITMAPINFO *)&bi, DIB_RGB_COLORS, &m_pBitsW, NULL, 0);
 
-        if (!m_hBmpB || !m_hBmpW) {
+        if (!m_hBmpB || !m_hBmpW)
+        {
             FreeResources();
             return false;
         }
@@ -435,118 +547,164 @@ class CursorEngine {
         return true;
     }
 
-    void FreeResources() {
-        if (m_hMemDC) { DeleteDC(m_hMemDC); m_hMemDC = NULL; }
-        if (m_hBmpB) { DeleteObject(m_hBmpB); m_hBmpB = NULL; }
-        if (m_hBmpW) { DeleteObject(m_hBmpW); m_hBmpW = NULL; }
+    void FreeResources()
+    {
+        if (m_hMemDC)
+        {
+            DeleteDC(m_hMemDC);
+            m_hMemDC = NULL;
+        }
+        if (m_hBmpB)
+        {
+            DeleteObject(m_hBmpB);
+            m_hBmpB = NULL;
+        }
+        if (m_hBmpW)
+        {
+            DeleteObject(m_hBmpW);
+            m_hBmpW = NULL;
+        }
         m_pBitsB = NULL;
         m_pBitsW = NULL;
         m_cachedWidth = 0;
         m_cachedHeight = 0;
     }
 
-    int GetTargetSize() {
+    int GetTargetSize()
+    {
         // 简单缓存注册表读取，避免每次读注册表
         static int s_size = 32;
         static auto s_lastCheck = std::chrono::steady_clock::now();
         auto now = std::chrono::steady_clock::now();
-        
+
         // 每 2 秒才读一次注册表
-        if (std::chrono::duration_cast<std::chrono::seconds>(now - s_lastCheck).count() > 2) {
+        if (std::chrono::duration_cast<std::chrono::seconds>(now - s_lastCheck).count() > 2)
+        {
             s_lastCheck = now;
-            HKEY k; 
-            if(RegOpenKeyExA(HKEY_CURRENT_USER, "Control Panel\\Cursors", 0, KEY_READ, &k)==0) {
-                DWORD t, sz=4, v=0; 
-                if(RegQueryValueExA(k, "CursorBaseSize", 0, &t, (BYTE*)&v, &sz)==0) s_size=v;
+            HKEY k;
+            if (RegOpenKeyExA(HKEY_CURRENT_USER, "Control Panel\\Cursors", 0, KEY_READ, &k) == 0)
+            {
+                DWORD t, sz = 4, v = 0;
+                if (RegQueryValueExA(k, "CursorBaseSize", 0, &t, (BYTE *)&v, &sz) == 0)
+                    s_size = v;
                 RegCloseKey(k);
             }
         }
         return std::clamp(s_size, 32, 256);
     }
 
-    std::pair<int, int> GetAnimInfo(HCURSOR h) {
-        if(!m_pGetCursorFrameInfo) return {1, 0};
-        DWORD rate=0, count=0;
-        if(m_pGetCursorFrameInfo(h, 0, 0, &rate, &count)) {
-            if(count == 0) count = 1;
+    std::pair<int, int> GetAnimInfo(HCURSOR h)
+    {
+        if (!m_pGetCursorFrameInfo)
+            return {1, 0};
+        DWORD rate = 0, count = 0;
+        if (m_pGetCursorFrameInfo(h, 0, 0, &rate, &count))
+        {
+            if (count == 0)
+                count = 1;
             int delay = (int)((rate * 1000) / 60);
-            if(delay < 10) delay = 0;
-            return { (int)count, delay };
+            if (delay < 10)
+                delay = 0;
+            return {(int)count, delay};
         }
         return {1, 0};
     }
 
 public:
-    CursorEngine(NetworkManager& n) : m_net(n), m_token(0), m_hUser32(NULL), m_pGetCursorFrameInfo(NULL) {
-        Gdiplus::GdiplusStartupInput i; Gdiplus::GdiplusStartup(&m_token, &i, NULL);
+    CursorEngine(NetworkManager &n) : m_net(n), m_token(0), m_hUser32(NULL), m_pGetCursorFrameInfo(NULL)
+    {
+        Gdiplus::GdiplusStartupInput i;
+        Gdiplus::GdiplusStartup(&m_token, &i, NULL);
         m_hUser32 = LoadLibraryA("user32.dll");
-        if(m_hUser32) m_pGetCursorFrameInfo = (GETCURSORFRAMEINFO)GetProcAddress(m_hUser32, "GetCursorFrameInfo");
+        if (m_hUser32)
+            m_pGetCursorFrameInfo = (GETCURSORFRAMEINFO)GetProcAddress(m_hUser32, "GetCursorFrameInfo");
         mLastProcessTime = std::chrono::steady_clock::now();
     }
 
-    ~CursorEngine() {
+    ~CursorEngine()
+    {
         FreeResources();
-        if(m_hUser32) FreeLibrary(m_hUser32);
+        if (m_hUser32)
+            FreeLibrary(m_hUser32);
         Gdiplus::GdiplusShutdown(m_token);
     }
 
-    void CaptureAndSend() {
+    void CaptureAndSend()
+    {
         // --- 优化 1: 频率限制 (Debounce) ---
         // 强制两次处理之间至少间隔 30ms (约 33 FPS)
         // 即使鼠标移动极快，我们也不需要处理得比屏幕刷新率还快
         auto now = std::chrono::steady_clock::now();
-        if (std::chrono::duration_cast<std::chrono::milliseconds>(now - mLastProcessTime).count() < 30) {
+        if (std::chrono::duration_cast<std::chrono::milliseconds>(now - mLastProcessTime).count() < 30)
+        {
             return;
         }
         mLastProcessTime = now;
 
-        CURSORINFO ci={sizeof(ci)}; 
-        if(!GetCursorInfo(&ci) || !(ci.flags & CURSOR_SHOWING)) return;
+        CURSORINFO ci = {sizeof(ci)};
+        if (!GetCursorInfo(&ci) || !(ci.flags & CURSOR_SHOWING))
+            return;
 
         // --- 优化 2: 严格句柄去重 ---
         // 如果句柄没变，直接返回，什么都不做。
         // 因为我们使用的是 Sprite Sheet 协议，动画也是一次性发完的。
         // 只要句柄不变，客户端就已经有了正确的动画在播放，无需任何网络通信。
-        if (ci.hCursor == mLastCursor) {
-            return; 
+        if (ci.hCursor == mLastCursor)
+        {
+            return;
         }
 
         // ==========================================
         //  只有当光标真正改变时，才执行下面的重操作
         // ==========================================
-        
+
         int size = GetTargetSize();
         auto [frames, delay] = GetAnimInfo(ci.hCursor);
-        
+
         // 获取原始尺寸计算热点
-        ICONINFO ii={0}; GetIconInfo(ci.hCursor, &ii);
-        int orgW=32, orgH=32; BITMAP bmp;
-        if(ii.hbmColor && GetObject(ii.hbmColor, sizeof(bmp), &bmp)) { orgW=bmp.bmWidth; orgH=bmp.bmHeight; }
-        else if(ii.hbmMask && GetObject(ii.hbmMask, sizeof(bmp), &bmp)) { orgW=bmp.bmWidth; orgH=bmp.bmHeight/2; }
-        DeleteObject(ii.hbmMask); DeleteObject(ii.hbmColor); 
+        ICONINFO ii = {0};
+        GetIconInfo(ci.hCursor, &ii);
+        int orgW = 32, orgH = 32;
+        BITMAP bmp;
+        if (ii.hbmColor && GetObject(ii.hbmColor, sizeof(bmp), &bmp))
+        {
+            orgW = bmp.bmWidth;
+            orgH = bmp.bmHeight;
+        }
+        else if (ii.hbmMask && GetObject(ii.hbmMask, sizeof(bmp), &bmp))
+        {
+            orgW = bmp.bmWidth;
+            orgH = bmp.bmHeight / 2;
+        }
+        DeleteObject(ii.hbmMask);
+        DeleteObject(ii.hbmColor);
 
         int hotX = (int)(ii.xHotspot * ((float)size / orgW));
         int hotY = (int)(ii.yHotspot * ((float)size / orgH));
-        if(hotX >= size) hotX = size-1; 
-        if(hotY >= size) hotY = size-1;
+        if (hotX >= size)
+            hotX = size - 1;
+        if (hotY >= size)
+            hotY = size - 1;
 
         int sheetW = size;
         int sheetH = size * frames;
 
         // --- 优化 3: 资源复用 ---
         // 只有当 sheetW 或 sheetH 发生变化时（极少），才分配内存
-        if (!RecreateResources(sheetW, sheetH)) return;
+        if (!RecreateResources(sheetW, sheetH))
+            return;
 
         // 绘制背景 (批量清空)
         RECT allRc = {0, 0, sheetW, sheetH};
         SelectObject(m_hMemDC, m_hBmpB);
         FillRect(m_hMemDC, &allRc, (HBRUSH)GetStockObject(BLACK_BRUSH));
-        
+
         SelectObject(m_hMemDC, m_hBmpW);
         FillRect(m_hMemDC, &allRc, (HBRUSH)GetStockObject(WHITE_BRUSH));
 
         // 绘制帧
-        for(int i=0; i<frames; ++i) {
+        for (int i = 0; i < frames; ++i)
+        {
             int drawY = i * size;
             SelectObject(m_hMemDC, m_hBmpB);
             DrawIconEx(m_hMemDC, 0, drawY, ci.hCursor, size, size, i, NULL, DI_NORMAL);
@@ -555,60 +713,73 @@ public:
         }
 
         // 像素提取
-        uint32_t* pxB = (uint32_t*)m_pBitsB;
-        uint32_t* pxW = (uint32_t*)m_pBitsW;
+        uint32_t *pxB = (uint32_t *)m_pBitsB;
+        uint32_t *pxW = (uint32_t *)m_pBitsW;
         int totalPixels = sheetW * sheetH;
         std::vector<uint32_t> rawPixels(totalPixels);
 
         // 使用指针遍历优化，避免数组索引乘法开销
-        for(int i=0; i<totalPixels; ++i) {
+        for (int i = 0; i < totalPixels; ++i)
+        {
             uint32_t cB = pxB[i];
             uint32_t cW = pxW[i];
-            
+
             uint8_t bb = (cB & 0xFF), bg = ((cB >> 8) & 0xFF), br = ((cB >> 16) & 0xFF);
             uint8_t wb = (cW & 0xFF), wg = ((cW >> 8) & 0xFF), wr = ((cW >> 16) & 0xFF);
-            
-            int dr=wr-br, dg=wg-bg, db=wb-bb;
+
+            int dr = wr - br, dg = wg - bg, db = wb - bb;
             // 简单的数学优化
             int maxDiff = (dr > dg) ? dr : dg;
-            if (db > maxDiff) maxDiff = db;
-            
+            if (db > maxDiff)
+                maxDiff = db;
+
             uint8_t alpha = (uint8_t)(255 - (maxDiff < 0 ? 0 : (maxDiff > 255 ? 255 : maxDiff)));
-            rawPixels[i] = (alpha<<24) | (br<<16) | (bg<<8) | bb;
+            rawPixels[i] = (alpha << 24) | (br << 16) | (bg << 8) | bb;
         }
 
         // 计算 Hash
-        size_t rawDataSize = rawPixels.size()*4;
-        uint32_t hash = CalculateCRC32(std::vector<uint8_t>((uint8_t*)rawPixels.data(), (uint8_t*)rawPixels.data()+rawDataSize));
+        size_t rawDataSize = rawPixels.size() * 4;
+        uint32_t hash = CalculateCRC32(std::vector<uint8_t>((uint8_t *)rawPixels.data(), (uint8_t *)rawPixels.data() + rawDataSize));
 
         // 生成 PNG (如果缓存没有)
         std::vector<uint8_t> png;
-        if(!m_net.GetCachedPng(hash, png)) {
+        if (!m_net.GetCachedPng(hash, png))
+        {
             Gdiplus::Bitmap gdiBmp(sheetW, sheetH, PixelFormat32bppARGB);
-            Gdiplus::BitmapData bd; Gdiplus::Rect r(0,0,sheetW,sheetH);
+            Gdiplus::BitmapData bd;
+            Gdiplus::Rect r(0, 0, sheetW, sheetH);
             gdiBmp.LockBits(&r, Gdiplus::ImageLockModeWrite, PixelFormat32bppARGB, &bd);
             memcpy(bd.Scan0, rawPixels.data(), rawDataSize);
             gdiBmp.UnlockBits(&bd);
-            
-            IStream* s=NULL; CreateStreamOnHGlobal(NULL, TRUE, &s);
-            CLSID pngId; GetEncoderClsid(L"image/png", &pngId);
+
+            IStream *s = NULL;
+            CreateStreamOnHGlobal(NULL, TRUE, &s);
+            CLSID pngId;
+            GetEncoderClsid(L"image/png", &pngId);
             gdiBmp.Save(s, &pngId, NULL);
-            STATSTG stg; s->Stat(&stg, STATFLAG_NONAME);
+            STATSTG stg;
+            s->Stat(&stg, STATFLAG_NONAME);
             png.resize(stg.cbSize.LowPart);
-            LARGE_INTEGER pos={0}; s->Seek(pos, STREAM_SEEK_SET, NULL);
-            ULONG read; s->Read(png.data(), (ULONG)png.size(), &read);
+            LARGE_INTEGER pos = {0};
+            s->Seek(pos, STREAM_SEEK_SET, NULL);
+            ULONG read;
+            s->Read(png.data(), (ULONG)png.size(), &read);
             s->Release();
             m_net.CachePng(hash, png);
         }
 
         // 发送并更新状态
-        if(!png.empty()) {
+        if (!png.empty())
+        {
             mLastCursor = ci.hCursor; // 更新句柄缓存，阻止下次重复计算
-            
-            if(frames > 1) {
-                Logger::Get().Info("发送动画 | Hash:", hash, " 帧数:", frames);
-            } else {
-                Logger::Get().Info("发送静态 | Hash:", hash);
+
+            if (frames > 1)
+            {
+                Logger::Get().Debug("发送动画 | Hash:", hash, " 帧数:", frames);
+            }
+            else
+            {
+                Logger::Get().Debug("发送静态 | Hash:", hash);
             }
 
             m_net.BroadcastCursor(hash, hotX, hotY, frames, delay, png);
@@ -625,72 +796,103 @@ std::unique_ptr<CursorEngine> g_engine;
 bool g_exit = false;
 
 // Windows 事件钩子：当光标改变时触发
-void CALLBACK HookProc(HWINEVENTHOOK, DWORD, HWND, LONG id, LONG, DWORD, DWORD) {
-    if(id==OBJID_CURSOR) { 
-        std::lock_guard<std::mutex> l(g_mutexCursor); 
-        g_cursorChanged=true; 
-        g_cvCursorChanged.notify_one(); 
+void CALLBACK HookProc(HWINEVENTHOOK, DWORD, HWND, LONG id, LONG, DWORD, DWORD)
+{
+    if (id == OBJID_CURSOR)
+    {
+        std::lock_guard<std::mutex> l(g_mutexCursor);
+        g_cursorChanged = true;
+        g_cvCursorChanged.notify_one();
     }
 }
 
 // 工作线程：处理图像
-void Worker() {
-    while(!g_exit) {
-        { 
-            std::unique_lock<std::mutex> l(g_mutexCursor); 
+void Worker()
+{
+    while (!g_exit)
+    {
+        {
+            std::unique_lock<std::mutex> l(g_mutexCursor);
             // 等待信号，或者 33ms 超时轮询 (30FPS兜底)
-            g_cvCursorChanged.wait_for(l, std::chrono::milliseconds(33), []{return g_cursorChanged || g_exit;}); 
-            if(g_exit) break; 
-            g_cursorChanged=false; 
+            g_cvCursorChanged.wait_for(l, std::chrono::milliseconds(33), []
+                                       { return g_cursorChanged || g_exit; });
+            if (g_exit)
+                break;
+            g_cursorChanged = false;
         }
         g_engine->CaptureAndSend();
     }
 }
 
 // 命令行参数处理
-void ShowUsage() {
+void ShowUsage()
+{
     std::cout << "Usage: cursor_monitor [options]\n  -l LVL  Set log level (TRACE, DEBUG, INFO, ERROR)\n";
 }
 
-int main(int argc, char* argv[]) {
+int main(int argc, char *argv[])
+{
     // 日志级别设置
-    LogLevel lvl = LogLevel::DEBUG;
-    for(int i=1; i<argc; ++i) {
-        std::string s=argv[i];
-        if(s=="-l" && i+1<argc) {
-            std::string v=argv[++i];
-            if(v=="INFO") lvl=LogLevel::INFO;
-            else if(v=="ERROR") lvl=LogLevel::LOG_ERROR;
+    LogLevel lvl = LogLevel::INFO;
+    for (int i = 1; i < argc; ++i)
+    {
+        std::string s = argv[i];
+        if (s == "-l" && i + 1 < argc)
+        {
+            std::string v = argv[++i];
+            if (v == "INFO")
+                lvl = LogLevel::INFO;
+            else if (v == "DEBUG")
+                lvl = LogLevel::DEBUG;
+            else if (v == "TRACE")
+                lvl = LogLevel::TRACE;
+            else if (v == "ERROR")
+                lvl = LogLevel::LOG_ERROR;
         }
     }
     Logger::Get().SetLogLevel(lvl);
 
     // 强制开启高 DPI (Shcore)
-    HMODULE h=LoadLibraryA("Shcore.dll");
-    if(h) { 
-        typedef HRESULT(WINAPI* SDPA)(PROCESS_DPI_AWARENESS);
+    HMODULE h = LoadLibraryA("Shcore.dll");
+    if (h)
+    {
+        typedef HRESULT(WINAPI * SDPA)(PROCESS_DPI_AWARENESS);
         SDPA p = (SDPA)GetProcAddress(h, "SetProcessDpiAwareness");
-        if(p) p(PROCESS_PER_MONITOR_DPI_AWARE);
+        if (p)
+            p(PROCESS_PER_MONITOR_DPI_AWARE);
         FreeLibrary(h);
-    } else SetProcessDPIAware();
+    }
+    else
+        SetProcessDPIAware();
 
     Logger::Get().Info("======= 程序启动 (TCP + Animated Sprite Sheet) =======");
 
-    if(!g_net.Initialize()) return 1;
+    if (!g_net.Initialize())
+        return 1;
     g_engine = std::make_unique<CursorEngine>(g_net);
-    
+
     // 启动线程
     std::thread t1(Worker);
-    std::thread t2([&]{ g_net.AcceptLoop(); });
-    
+    std::thread t2([&]
+                   { g_net.AcceptLoop(); });
+
     // 安装钩子
-    HWINEVENTHOOK hHook = SetWinEventHook(EVENT_OBJECT_NAMECHANGE, EVENT_OBJECT_NAMECHANGE, NULL, HookProc, 0, 0, WINEVENT_OUTOFCONTEXT|WINEVENT_SKIPOWNPROCESS);
-    
+    HWINEVENTHOOK hHook = SetWinEventHook(EVENT_OBJECT_NAMECHANGE, EVENT_OBJECT_NAMECHANGE, NULL, HookProc, 0, 0, WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS);
+
     // 消息循环 (必须保留以响应钩子)
-    MSG msg; while(GetMessage(&msg,NULL,0,0)) { TranslateMessage(&msg); DispatchMessage(&msg); }
-    
+    MSG msg;
+    while (GetMessage(&msg, NULL, 0, 0))
+    {
+        TranslateMessage(&msg);
+        DispatchMessage(&msg);
+    }
+
     // 退出清理
-    g_exit=true; g_cvCursorChanged.notify_all();
-    g_net.Shutdown(); t1.join(); t2.join(); UnhookWinEvent(hHook);
+    g_exit = true;
+    g_cvCursorChanged.notify_all();
+    g_net.Shutdown();
+    t1.join();
+    t2.join();
+    UnhookWinEvent(hHook);
     return 0;
 }
