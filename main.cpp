@@ -34,6 +34,7 @@
 #include <condition_variable>
 #include <atomic>
 #include <map>
+#include <unordered_set>
 #include <list>
 #include <chrono>
 #include <algorithm>
@@ -130,109 +131,225 @@ std::mutex g_mutexCursor;
 bool g_cursorChanged = false;
 
 // ==========================================
-//           3. 网络管理 (支持新协议)
+//           3. 网络管理 (完整版 - 支持缓存复用)
 // ==========================================
 
-struct ClientSession { SOCKET socket; bool connected; uint32_t lastSentHash; };
+// 客户端会话结构
+struct ClientSession {
+    SOCKET socket;
+    bool connected;
+    uint32_t lastSentHash; // 上一次发送的 Hash (用于连续帧去重)
+    
+    // 记录该客户端已经接收并缓存过的光标 Hash ID
+    // 服务端通过查询这个集合，决定是发图片还是只发 ID
+    std::unordered_set<uint32_t> cachedHashes; 
+};
 
 class NetworkManager {
     SOCKET m_listenSocket;
-    std::list<std::shared_ptr<ClientSession>> m_clients;
+    std::list<std::shared_ptr<ClientSession>> m_clients; // 客户端列表
     std::mutex m_clientsMutex;
+    
+    // 服务端全局 PNG 缓存 (用于 CursorEngine 避免重复压缩)
     std::map<uint32_t, std::vector<uint8_t>> m_cache;
     std::mutex m_cacheMutex;
+    
     std::atomic<bool> m_running{ true };
 
 public:
     NetworkManager() : m_listenSocket(INVALID_SOCKET) {}
 
+    // 1. 初始化 TCP 服务端
     bool Initialize() {
-        WSADATA wsa; WSAStartup(MAKEWORD(2,2), &wsa);
+        WSADATA wsaData;
+        if (WSAStartup(MAKEWORD(2, 2), &wsaData) != 0) return false;
+
         m_listenSocket = socket(AF_INET6, SOCK_STREAM, IPPROTO_TCP);
-        if(m_listenSocket == INVALID_SOCKET) return false;
-        
-        int no=0, yes=1;
+        if (m_listenSocket == INVALID_SOCKET) return false;
+
+        int no = 0;
+        int yes = 1;
+        // 允许 IPv4 和 IPv6 双栈
         setsockopt(m_listenSocket, IPPROTO_IPV6, IPV6_V6ONLY, (char*)&no, sizeof(no));
+        // 允许端口重用 (快速重启)
         setsockopt(m_listenSocket, SOL_SOCKET, SO_REUSEADDR, (char*)&yes, sizeof(yes));
-        
-        sockaddr_in6 addr={0}; 
-        addr.sin6_family=AF_INET6; 
-        addr.sin6_port=htons(LISTEN_PORT);
-        
-        if(bind(m_listenSocket, (sockaddr*)&addr, sizeof(addr)) == SOCKET_ERROR) return false;
-        if(listen(m_listenSocket, SOMAXCONN) == SOCKET_ERROR) return false;
-        
-        Logger::Get().Info("TCP 服务端就绪，端口:", LISTEN_PORT);
+
+        sockaddr_in6 addr = {};
+        addr.sin6_family = AF_INET6;
+        addr.sin6_port = htons(LISTEN_PORT); // 端口 5005
+        addr.sin6_addr = in6addr_any;
+
+        if (bind(m_listenSocket, (sockaddr*)&addr, sizeof(addr)) == SOCKET_ERROR) return false;
+        if (listen(m_listenSocket, SOMAXCONN) == SOCKET_ERROR) return false;
+
+        Logger::Get().Info("TCP 服务端已启动，端口:", LISTEN_PORT);
         return true;
     }
 
+    // 2. 关闭与清理
     void Shutdown() {
         m_running = false;
-        closesocket(m_listenSocket);
-        { std::lock_guard<std::mutex> l(m_clientsMutex); for(auto& c : m_clients) closesocket(c->socket); m_clients.clear(); }
+        if (m_listenSocket != INVALID_SOCKET) {
+            closesocket(m_listenSocket);
+            m_listenSocket = INVALID_SOCKET;
+        }
+        
+        std::lock_guard<std::mutex> lock(m_clientsMutex);
+        for (auto& client : m_clients) {
+            if (client->socket != INVALID_SOCKET) closesocket(client->socket);
+        }
+        m_clients.clear();
         WSACleanup();
     }
 
+    // 3. 接受连接循环 (需在独立线程运行)
     void AcceptLoop() {
-        while(m_running) {
-            SOCKET c = accept(m_listenSocket, NULL, NULL);
-            if(c == INVALID_SOCKET) break;
-            int yes=1; setsockopt(c, IPPROTO_TCP, TCP_NODELAY, (char*)&yes, sizeof(yes));
+        Logger::Get().Info("开始等待客户端连接...");
+        while (m_running) {
+            sockaddr_in6 clientAddr;
+            int len = sizeof(clientAddr);
+            SOCKET clientSock = accept(m_listenSocket, (sockaddr*)&clientAddr, &len);
             
-            auto s = std::make_shared<ClientSession>();
-            s->socket = c; s->connected = true; s->lastSentHash = 0;
-            
-            { std::lock_guard<std::mutex> l(m_clientsMutex); m_clients.push_back(s); }
-            
-            // 触发一次发送，让新客户端立即获得光标
-            { std::lock_guard<std::mutex> l(g_mutexCursor); g_cursorChanged = true; } 
-            g_cvCursorChanged.notify_one();
-            
-            Logger::Get().Info("新客户端已连接");
+            if (clientSock != INVALID_SOCKET) {
+                // 禁用 Nagle 算法，确保极低延迟
+                int yes = 1;
+                setsockopt(clientSock, IPPROTO_TCP, TCP_NODELAY, (char*)&yes, sizeof(yes));
+
+                auto session = std::make_shared<ClientSession>();
+                session->socket = clientSock;
+                session->connected = true;
+                session->lastSentHash = 0;
+                // 新连接到来时，cachedHashes 默认为空，会强制客户端重新下载光标
+
+                char ipStr[INET6_ADDRSTRLEN];
+                inet_ntop(AF_INET6, &clientAddr.sin6_addr, ipStr, INET6_ADDRSTRLEN);
+                Logger::Get().Info("客户端已连接:", ipStr);
+
+                {
+                    std::lock_guard<std::mutex> lock(m_clientsMutex);
+                    m_clients.push_back(session);
+                }
+
+                // 唤醒主线程立即发送当前光标
+                {
+                    std::lock_guard<std::mutex> lock(g_mutexCursor);
+                    g_cursorChanged = true;
+                }
+                g_cvCursorChanged.notify_one();
+            }
         }
     }
 
-    bool GetCachedPng(uint32_t hash, std::vector<uint8_t>& out) {
-        std::lock_guard<std::mutex> l(m_cacheMutex);
-        if(m_cache.count(hash)) { out=m_cache[hash]; return true; }
+    // 4. 服务端内部 PNG 缓存 (避免重复 GDI+ 压缩)
+    bool GetCachedPng(uint32_t hash, std::vector<uint8_t>& outPng) {
+        std::lock_guard<std::mutex> lock(m_cacheMutex);
+        auto it = m_cache.find(hash);
+        if (it != m_cache.end()) {
+            outPng = it->second;
+            return true;
+        }
         return false;
     }
 
-    void CachePng(uint32_t hash, const std::vector<uint8_t>& data) {
-        std::lock_guard<std::mutex> l(m_cacheMutex);
-        if(m_cache.size() > 50) m_cache.clear();
-        m_cache[hash] = data;
+    void CachePng(uint32_t hash, const std::vector<uint8_t>& pngData) {
+        std::lock_guard<std::mutex> lock(m_cacheMutex);
+        if (m_cache.size() > 50) m_cache.clear(); // 简单清理
+        m_cache[hash] = pngData;
     }
 
-    // 广播函数：支持帧数和延迟
-    void BroadcastCursor(uint32_t hash, int32_t hotX, int32_t hotY, int32_t frames, int32_t delay, const std::vector<uint8_t>& png) {
+    // 5. 核心广播函数 (支持缓存协议)
+    void BroadcastCursor(uint32_t hash, int32_t hotX, int32_t hotY, int32_t frames, int32_t delay, const std::vector<uint8_t>& pngData) {
         std::lock_guard<std::mutex> lock(m_clientsMutex);
         
-        uint32_t pngSize = (uint32_t)png.size();
-        // 包结构：[BodyLen 4] + [HotX 4] [HotY 4] [Frames 4] [Delay 4] + [PNG Data...]
-        uint32_t bodySize = 16 + pngSize; 
+        // --- 预构建数据包 ---
         
-        std::vector<uint8_t> packet(4 + bodySize);
-        memcpy(packet.data(), &bodySize, 4);
-        memcpy(packet.data() + 4, &hotX, 4);
-        memcpy(packet.data() + 8, &hotY, 4);
-        memcpy(packet.data() + 12, &frames, 4);
-        memcpy(packet.data() + 16, &delay, 4);
-        memcpy(packet.data() + 20, png.data(), pngSize);
+        // Header 部分 (20 字节)
+        // [Hash(4)] [HotX(4)] [HotY(4)] [Frames(4)] [Delay(4)]
+        const uint32_t HEADER_SIZE = 20;
 
+        // A. 完整包 (Full Packet)
+        // [BodyLen(4)] + [Header(20)] + [PNG Data...]
+        uint32_t fullBodySize = HEADER_SIZE + (uint32_t)pngData.size();
+        std::vector<uint8_t> fullPacket(4 + fullBodySize);
+        {
+            uint8_t* p = fullPacket.data();
+            memcpy(p, &fullBodySize, 4); p += 4; // BodyLen
+            memcpy(p, &hash, 4);         p += 4; // Hash
+            memcpy(p, &hotX, 4);         p += 4; // HotX
+            memcpy(p, &hotY, 4);         p += 4; // HotY
+            memcpy(p, &frames, 4);       p += 4; // Frames
+            memcpy(p, &delay, 4);        p += 4; // Delay
+            memcpy(p, pngData.data(), pngData.size()); // PNG
+        }
+
+        // B. 短包 (Cached Packet)
+        // [BodyLen(4)] + [Header(20)]
+        uint32_t cachedBodySize = HEADER_SIZE;
+        std::vector<uint8_t> cachedPacket(4 + cachedBodySize);
+        {
+            uint8_t* p = cachedPacket.data();
+            memcpy(p, &cachedBodySize, 4); p += 4; // BodyLen
+            memcpy(p, &hash, 4);           p += 4; // Hash
+            memcpy(p, &hotX, 4);           p += 4; // ...
+            memcpy(p, &hotY, 4);           p += 4;
+            memcpy(p, &frames, 4);         p += 4;
+            memcpy(p, &delay, 4);
+        }
+
+        // --- 遍历发送 ---
         for (auto it = m_clients.begin(); it != m_clients.end(); ) {
-            auto& c = *it;
-            if (!c->connected) { it = m_clients.erase(it); continue; }
+            auto& client = *it;
             
-            // 去重：如果该客户端已经有这个 Hash，就不发了
-            if (c->lastSentHash == hash) { ++it; continue; }
-            
-            if (send(c->socket, (const char*)packet.data(), (int)packet.size(), 0) == SOCKET_ERROR) {
-                closesocket(c->socket); c->connected = false; it = m_clients.erase(it);
-            } else {
-                c->lastSentHash = hash;
-                ++it;
+            if (!client->connected) {
+                it = m_clients.erase(it);
+                continue;
             }
+
+            // 1. 连续去重：如果该客户端刚刚才发过这个光标，跳过
+            if (client->lastSentHash == hash) {
+                ++it;
+                continue;
+            }
+
+            // 2. 缓存检查
+            const std::vector<uint8_t>* pPacketToSend = nullptr;
+            bool isCacheHit = false;
+
+            if (client->cachedHashes.find(hash) != client->cachedHashes.end()) {
+                // 命中缓存：只发头信息
+                pPacketToSend = &cachedPacket;
+                isCacheHit = true;
+            } else {
+                // 未命中：发全量数据
+                pPacketToSend = &fullPacket;
+                
+                // 记录该客户端已拥有此 Hash
+                client->cachedHashes.insert(hash);
+                // 防止长时间运行内存膨胀 (保留最近的 100 个光标足够用了)
+                if (client->cachedHashes.size() > 100) {
+                    client->cachedHashes.clear();
+                    // 清空后，下次遇到旧光标会重新发送一次全量包，这是安全的
+                }
+            }
+
+            // 3. 执行发送
+            int sentBytes = send(client->socket, (const char*)pPacketToSend->data(), (int)pPacketToSend->size(), 0);
+
+            if (sentBytes == SOCKET_ERROR) {
+                Logger::Get().Info("客户端断开连接");
+                closesocket(client->socket);
+                client->connected = false;
+                it = m_clients.erase(it);
+                continue;
+            } else {
+                client->lastSentHash = hash;
+                if (isCacheHit) {
+                    Logger::Get().Debug("客户端缓存命中 (24B) -> Hash:", hash);
+                } else {
+                    Logger::Get().Debug("发送完整数据 (", pPacketToSend->size(), "B) -> Hash:", hash);
+                }
+            }
+            ++it;
         }
     }
 };
