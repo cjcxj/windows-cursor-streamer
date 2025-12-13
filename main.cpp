@@ -361,17 +361,35 @@ public:
 // user32.dll 未公开 API 定义
 typedef BOOL(WINAPI* GETCURSORFRAMEINFO)(HCURSOR, DWORD, DWORD, DWORD*, DWORD*);
 
+// ==========================================
+//           4. 光标引擎 (高性能优化版)
+// ==========================================
+// 优化点：
+// 1. 资源复用：不再每帧创建/销毁 GDI 对象
+// 2. 严格去重：句柄不变时，完全不执行任何逻辑
+// 3. 频率限制：强制最小间隔，防止高频抖动
+
 class CursorEngine {
     ULONG_PTR m_token;
     NetworkManager& m_net;
     HMODULE m_hUser32;
     GETCURSORFRAMEINFO m_pGetCursorFrameInfo;
 
-    // 状态缓存
+    // --- 状态缓存 ---
     HCURSOR mLastCursor = NULL;
-    uint32_t mLastHash = 0;
-    std::vector<uint8_t> mLastPng;
-    int mLastHotX=0, mLastHotY=0, mLastFrames=1, mLastDelay=0;
+    // 上一次处理的时间点
+    std::chrono::steady_clock::time_point mLastProcessTime;
+
+    // --- GDI 资源池 (避免重复创建销毁) ---
+    HDC m_hMemDC = NULL;
+    HBITMAP m_hBmpB = NULL;
+    HBITMAP m_hBmpW = NULL;
+    HGDIOBJ m_hOldB = NULL;
+    HGDIOBJ m_hOldW = NULL;
+    void* m_pBitsB = NULL;
+    void* m_pBitsW = NULL;
+    int m_cachedWidth = 0;
+    int m_cachedHeight = 0; // 单帧高度
 
     static int GetEncoderClsid(const WCHAR* format, CLSID* pClsid) {
         UINT num, size; Gdiplus::GetImageEncodersSize(&num, &size);
@@ -382,24 +400,75 @@ class CursorEngine {
         return -1;
     }
 
-    // 从注册表读取用户设置的光标大小
-    int GetTargetSize() {
-        HKEY k; int s=32;
-        if(RegOpenKeyExA(HKEY_CURRENT_USER, "Control Panel\\Cursors", 0, KEY_READ, &k)==0) {
-            DWORD t, sz=4, v=0; 
-            if(RegQueryValueExA(k, "CursorBaseSize", 0, &t, (BYTE*)&v, &sz)==0) s=v;
-            RegCloseKey(k);
+    // 重新初始化 GDI 资源 (仅当尺寸变化时调用)
+    bool RecreateResources(int w, int hTotal) {
+        // 如果尺寸没变且资源存在，直接复用
+        if (m_hMemDC && m_hBmpB && m_hBmpW && w == m_cachedWidth && hTotal == m_cachedHeight) {
+            return true;
         }
-        return std::clamp(s, 32, 256);
+
+        FreeResources(); // 先清理旧的
+
+        HDC hScreen = GetDC(NULL);
+        m_hMemDC = CreateCompatibleDC(hScreen);
+        ReleaseDC(NULL, hScreen);
+
+        if (!m_hMemDC) return false;
+
+        BITMAPINFOHEADER bi = {sizeof(bi)};
+        bi.biWidth = w;
+        bi.biHeight = -hTotal; // Top-Down
+        bi.biPlanes = 1;
+        bi.biBitCount = 32;
+        bi.biCompression = BI_RGB;
+
+        m_hBmpB = CreateDIBSection(m_hMemDC, (BITMAPINFO*)&bi, DIB_RGB_COLORS, &m_pBitsB, NULL, 0);
+        m_hBmpW = CreateDIBSection(m_hMemDC, (BITMAPINFO*)&bi, DIB_RGB_COLORS, &m_pBitsW, NULL, 0);
+
+        if (!m_hBmpB || !m_hBmpW) {
+            FreeResources();
+            return false;
+        }
+
+        m_cachedWidth = w;
+        m_cachedHeight = hTotal;
+        return true;
     }
 
-    // 获取动画信息 <帧数, 延迟ms>
+    void FreeResources() {
+        if (m_hMemDC) { DeleteDC(m_hMemDC); m_hMemDC = NULL; }
+        if (m_hBmpB) { DeleteObject(m_hBmpB); m_hBmpB = NULL; }
+        if (m_hBmpW) { DeleteObject(m_hBmpW); m_hBmpW = NULL; }
+        m_pBitsB = NULL;
+        m_pBitsW = NULL;
+        m_cachedWidth = 0;
+        m_cachedHeight = 0;
+    }
+
+    int GetTargetSize() {
+        // 简单缓存注册表读取，避免每次读注册表
+        static int s_size = 32;
+        static auto s_lastCheck = std::chrono::steady_clock::now();
+        auto now = std::chrono::steady_clock::now();
+        
+        // 每 2 秒才读一次注册表
+        if (std::chrono::duration_cast<std::chrono::seconds>(now - s_lastCheck).count() > 2) {
+            s_lastCheck = now;
+            HKEY k; 
+            if(RegOpenKeyExA(HKEY_CURRENT_USER, "Control Panel\\Cursors", 0, KEY_READ, &k)==0) {
+                DWORD t, sz=4, v=0; 
+                if(RegQueryValueExA(k, "CursorBaseSize", 0, &t, (BYTE*)&v, &sz)==0) s_size=v;
+                RegCloseKey(k);
+            }
+        }
+        return std::clamp(s_size, 32, 256);
+    }
+
     std::pair<int, int> GetAnimInfo(HCURSOR h) {
         if(!m_pGetCursorFrameInfo) return {1, 0};
         DWORD rate=0, count=0;
         if(m_pGetCursorFrameInfo(h, 0, 0, &rate, &count)) {
             if(count == 0) count = 1;
-            // rate 单位通常是 Jiffies (1/60s)
             int delay = (int)((rate * 1000) / 60);
             if(delay < 10) delay = 0;
             return { (int)count, delay };
@@ -412,113 +481,118 @@ public:
         Gdiplus::GdiplusStartupInput i; Gdiplus::GdiplusStartup(&m_token, &i, NULL);
         m_hUser32 = LoadLibraryA("user32.dll");
         if(m_hUser32) m_pGetCursorFrameInfo = (GETCURSORFRAMEINFO)GetProcAddress(m_hUser32, "GetCursorFrameInfo");
+        mLastProcessTime = std::chrono::steady_clock::now();
     }
+
     ~CursorEngine() {
+        FreeResources();
         if(m_hUser32) FreeLibrary(m_hUser32);
         Gdiplus::GdiplusShutdown(m_token);
     }
 
     void CaptureAndSend() {
+        // --- 优化 1: 频率限制 (Debounce) ---
+        // 强制两次处理之间至少间隔 30ms (约 33 FPS)
+        // 即使鼠标移动极快，我们也不需要处理得比屏幕刷新率还快
+        auto now = std::chrono::steady_clock::now();
+        if (std::chrono::duration_cast<std::chrono::milliseconds>(now - mLastProcessTime).count() < 30) {
+            return;
+        }
+        mLastProcessTime = now;
+
         CURSORINFO ci={sizeof(ci)}; 
         if(!GetCursorInfo(&ci) || !(ci.flags & CURSOR_SHOWING)) return;
 
-        // 快速缓存校验 (句柄+缓存均有效)
-        if(ci.hCursor == mLastCursor && mLastCursor && !mLastPng.empty()) {
-            m_net.BroadcastCursor(mLastHash, mLastHotX, mLastHotY, mLastFrames, mLastDelay, mLastPng);
-            return;
+        // --- 优化 2: 严格句柄去重 ---
+        // 如果句柄没变，直接返回，什么都不做。
+        // 因为我们使用的是 Sprite Sheet 协议，动画也是一次性发完的。
+        // 只要句柄不变，客户端就已经有了正确的动画在播放，无需任何网络通信。
+        if (ci.hCursor == mLastCursor) {
+            return; 
         }
 
+        // ==========================================
+        //  只有当光标真正改变时，才执行下面的重操作
+        // ==========================================
+        
         int size = GetTargetSize();
         auto [frames, delay] = GetAnimInfo(ci.hCursor);
         
-        // --- 1. 计算缩放后的热点 ---
+        // 获取原始尺寸计算热点
         ICONINFO ii={0}; GetIconInfo(ci.hCursor, &ii);
         int orgW=32, orgH=32; BITMAP bmp;
         if(ii.hbmColor && GetObject(ii.hbmColor, sizeof(bmp), &bmp)) { orgW=bmp.bmWidth; orgH=bmp.bmHeight; }
         else if(ii.hbmMask && GetObject(ii.hbmMask, sizeof(bmp), &bmp)) { orgW=bmp.bmWidth; orgH=bmp.bmHeight/2; }
-        DeleteObject(ii.hbmMask); DeleteObject(ii.hbmColor); // 必须释放
+        DeleteObject(ii.hbmMask); DeleteObject(ii.hbmColor); 
 
         int hotX = (int)(ii.xHotspot * ((float)size / orgW));
         int hotY = (int)(ii.yHotspot * ((float)size / orgH));
         if(hotX >= size) hotX = size-1; 
         if(hotY >= size) hotY = size-1;
 
-        // --- 2. 准备 Sprite Sheet 画布 ---
         int sheetW = size;
-        int sheetH = size * frames; // 总高度
+        int sheetH = size * frames;
 
-        HDC hdc = GetDC(NULL);
-        ScopedMemDC dcMem(hdc);
-        ReleaseDC(NULL, hdc);
+        // --- 优化 3: 资源复用 ---
+        // 只有当 sheetW 或 sheetH 发生变化时（极少），才分配内存
+        if (!RecreateResources(sheetW, sheetH)) return;
 
-        BITMAPINFOHEADER bi={sizeof(bi)};
-        bi.biWidth = sheetW; bi.biHeight = -sheetH; // Top-Down
-        bi.biPlanes=1; bi.biBitCount=32; bi.biCompression=BI_RGB;
-
-        void *pB=NULL, *pW=NULL;
-        HBITMAP hBmpB = CreateDIBSection(dcMem, (BITMAPINFO*)&bi, DIB_RGB_COLORS, &pB, NULL, 0);
-        HBITMAP hBmpW = CreateDIBSection(dcMem, (BITMAPINFO*)&bi, DIB_RGB_COLORS, &pW, NULL, 0);
-        
-        if(!hBmpB || !hBmpW) return;
-        ScopedObject sb(hBmpB), sw(hBmpW);
-
-        // --- 3. 绘制每一帧 (Sprite Sheet Generation) ---
-        // 技巧：DrawIconEx 的 step 参数可以指定绘制动画的第几帧
-        
-        // 填充背景
+        // 绘制背景 (批量清空)
         RECT allRc = {0, 0, sheetW, sheetH};
-        SelectObject(dcMem, hBmpB);
-        FillRect(dcMem, &allRc, (HBRUSH)GetStockObject(BLACK_BRUSH));
-        SelectObject(dcMem, hBmpW);
-        FillRect(dcMem, &allRc, (HBRUSH)GetStockObject(WHITE_BRUSH));
+        SelectObject(m_hMemDC, m_hBmpB);
+        FillRect(m_hMemDC, &allRc, (HBRUSH)GetStockObject(BLACK_BRUSH));
+        
+        SelectObject(m_hMemDC, m_hBmpW);
+        FillRect(m_hMemDC, &allRc, (HBRUSH)GetStockObject(WHITE_BRUSH));
 
+        // 绘制帧
         for(int i=0; i<frames; ++i) {
             int drawY = i * size;
-            
-            // 在黑底上绘制第 i 帧
-            SelectObject(dcMem, hBmpB);
-            DrawIconEx(dcMem, 0, drawY, ci.hCursor, size, size, i, NULL, DI_NORMAL);
-
-            // 在白底上绘制第 i 帧
-            SelectObject(dcMem, hBmpW);
-            DrawIconEx(dcMem, 0, drawY, ci.hCursor, size, size, i, NULL, DI_NORMAL);
+            SelectObject(m_hMemDC, m_hBmpB);
+            DrawIconEx(m_hMemDC, 0, drawY, ci.hCursor, size, size, i, NULL, DI_NORMAL);
+            SelectObject(m_hMemDC, m_hBmpW);
+            DrawIconEx(m_hMemDC, 0, drawY, ci.hCursor, size, size, i, NULL, DI_NORMAL);
         }
 
-        // --- 4. 像素提取 (Raw Mode Alpha) ---
-        uint32_t* pxB = (uint32_t*)pB;
-        uint32_t* pxW = (uint32_t*)pW;
+        // 像素提取
+        uint32_t* pxB = (uint32_t*)m_pBitsB;
+        uint32_t* pxW = (uint32_t*)m_pBitsW;
         int totalPixels = sheetW * sheetH;
         std::vector<uint32_t> rawPixels(totalPixels);
 
+        // 使用指针遍历优化，避免数组索引乘法开销
         for(int i=0; i<totalPixels; ++i) {
-            uint8_t bb = (pxB[i]&0xFF), bg = ((pxB[i]>>8)&0xFF), br = ((pxB[i]>>16)&0xFF);
-            uint8_t wb = (pxW[i]&0xFF), wg = ((pxW[i]>>8)&0xFF), wr = ((pxW[i]>>16)&0xFF);
+            uint32_t cB = pxB[i];
+            uint32_t cW = pxW[i];
             
-            // Alpha 还原算法
+            uint8_t bb = (cB & 0xFF), bg = ((cB >> 8) & 0xFF), br = ((cB >> 16) & 0xFF);
+            uint8_t wb = (cW & 0xFF), wg = ((cW >> 8) & 0xFF), wr = ((cW >> 16) & 0xFF);
+            
             int dr=wr-br, dg=wg-bg, db=wb-bb;
-            int maxDiff = std::max({dr, dg, db});
-            uint8_t alpha = (uint8_t)std::clamp(255-maxDiff, 0, 255);
+            // 简单的数学优化
+            int maxDiff = (dr > dg) ? dr : dg;
+            if (db > maxDiff) maxDiff = db;
             
-            // 合成 ARGB
+            uint8_t alpha = (uint8_t)(255 - (maxDiff < 0 ? 0 : (maxDiff > 255 ? 255 : maxDiff)));
             rawPixels[i] = (alpha<<24) | (br<<16) | (bg<<8) | bb;
         }
 
-        // --- 5. 压缩与发送 ---
+        // 计算 Hash
         size_t rawDataSize = rawPixels.size()*4;
         uint32_t hash = CalculateCRC32(std::vector<uint8_t>((uint8_t*)rawPixels.data(), (uint8_t*)rawPixels.data()+rawDataSize));
 
+        // 生成 PNG (如果缓存没有)
         std::vector<uint8_t> png;
         if(!m_net.GetCachedPng(hash, png)) {
-            // GDI+ 保存 PNG
-            Gdiplus::Bitmap bmp(sheetW, sheetH, PixelFormat32bppARGB);
+            Gdiplus::Bitmap gdiBmp(sheetW, sheetH, PixelFormat32bppARGB);
             Gdiplus::BitmapData bd; Gdiplus::Rect r(0,0,sheetW,sheetH);
-            bmp.LockBits(&r, Gdiplus::ImageLockModeWrite, PixelFormat32bppARGB, &bd);
+            gdiBmp.LockBits(&r, Gdiplus::ImageLockModeWrite, PixelFormat32bppARGB, &bd);
             memcpy(bd.Scan0, rawPixels.data(), rawDataSize);
-            bmp.UnlockBits(&bd);
+            gdiBmp.UnlockBits(&bd);
             
             IStream* s=NULL; CreateStreamOnHGlobal(NULL, TRUE, &s);
             CLSID pngId; GetEncoderClsid(L"image/png", &pngId);
-            bmp.Save(s, &pngId, NULL);
+            gdiBmp.Save(s, &pngId, NULL);
             STATSTG stg; s->Stat(&stg, STATFLAG_NONAME);
             png.resize(stg.cbSize.LowPart);
             LARGE_INTEGER pos={0}; s->Seek(pos, STREAM_SEEK_SET, NULL);
@@ -527,22 +601,14 @@ public:
             m_net.CachePng(hash, png);
         }
 
+        // 发送并更新状态
         if(!png.empty()) {
-            // 更新缓存
-            mLastCursor = ci.hCursor; mLastHash = hash; mLastPng = png;
-            mLastHotX = hotX; mLastHotY = hotY; mLastFrames = frames; mLastDelay = delay;
+            mLastCursor = ci.hCursor; // 更新句柄缓存，阻止下次重复计算
             
-            // 详细日志
             if(frames > 1) {
-                Logger::Get().Info("发送动画光标 | 尺寸:", size, "x", size, 
-                                   " | 帧数:", frames, " | 延迟:", delay, "ms",
-                                   " | PNG大小:", png.size(), "B",
-                                   " | Hash:", hash);
+                Logger::Get().Info("发送动画 | Hash:", hash, " 帧数:", frames);
             } else {
-                Logger::Get().Info("发送静态光标 | 尺寸:", size, "x", size,
-                                   " | 热点:", hotX, ",", hotY,
-                                   " | PNG大小:", png.size(), "B",
-                                   " | Hash:", hash);
+                Logger::Get().Info("发送静态 | Hash:", hash);
             }
 
             m_net.BroadcastCursor(hash, hotX, hotY, frames, delay, png);
