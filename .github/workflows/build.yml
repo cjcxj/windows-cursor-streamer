@@ -3,9 +3,9 @@ name: Build Windows Exe
 # 触发条件：推送到 main 分支，或手动触发
 on:
   push:
-    branches: [ "cpp2" ]
+    branches: [ "光标动画" ]
   pull_request:
-    branches: [ "cpp2" ]
+    branches: [ "光标动画" ]
   workflow_dispatch:
 
 jobs:
