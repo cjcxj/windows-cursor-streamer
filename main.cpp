@@ -647,7 +647,7 @@ public:
         mLastCursor = NULL;
     }
 
-    void CaptureAndSend()
+void CaptureAndSend()
     {
         // --- 优化 1: 频率限制 (Debounce) ---
         // 强制两次处理之间至少间隔 30ms (约 33 FPS)
@@ -672,43 +672,69 @@ public:
             return;
         }
 
-        // ==========================================
-        //  只有当光标真正改变时，才执行下面的重操作
-        // ==========================================
-
-        int size = GetTargetSize();
+        // 1. 获取注册表建议的大小 (系统缩放大小)
+        int regSize = GetTargetSize();
+        
+        // 2. 获取动画帧数
         auto [frames, delay] = GetAnimInfo(ci.hCursor);
 
-        // 获取原始尺寸计算热点
+        // 3. 获取光标原始物理尺寸 (用于判断是否为自定义光标)
         ICONINFO ii = {0};
         GetIconInfo(ci.hCursor, &ii);
-        int orgW = 32, orgH = 32;
+        
+        int orgW = 32; // 默认为 32
+        int orgH = 32;
         BITMAP bmp;
+        
+        // 尝试获取 Color 位图信息
         if (ii.hbmColor && GetObject(ii.hbmColor, sizeof(bmp), &bmp))
         {
             orgW = bmp.bmWidth;
             orgH = bmp.bmHeight;
         }
+        // 如果没有 Color (黑白光标)，尝试获取 Mask 位图信息
         else if (ii.hbmMask && GetObject(ii.hbmMask, sizeof(bmp), &bmp))
         {
             orgW = bmp.bmWidth;
-            orgH = bmp.bmHeight / 2;
+            orgH = bmp.bmHeight / 2; // Mask 高度通常是双倍的
         }
-        DeleteObject(ii.hbmMask);
-        DeleteObject(ii.hbmColor);
+        
+        // 这里的 hbmColor 和 hbmMask 用完需要释放，防止内存泄漏
+        if (ii.hbmColor) DeleteObject(ii.hbmColor);
+        if (ii.hbmMask) DeleteObject(ii.hbmMask);
 
-        int hotX = (int)(ii.xHotspot * ((float)size / orgW));
-        int hotY = (int)(ii.yHotspot * ((float)size / orgH));
-        if (hotX >= size)
-            hotX = size - 1;
-        if (hotY >= size)
-            hotY = size - 1;
+        // =========================================================
+        //           核心逻辑修改：判断使用系统大小还是原始大小
+        // =========================================================
+        int finalSize = 0;
 
-        int sheetW = size;
-        int sheetH = size * frames;
+        // 逻辑：如果获取的大小等于32 或者 等于注册表大小 -> 视为系统光标，使用注册表大小捕获 (支持 DPI 缩放)
+        if (orgW == 32 || orgW == regSize)
+        {
+            finalSize = regSize; 
+        }
+        else
+        {
+            // 反之 -> 视为自定义光标 (如游戏光标)，使用获取的大小捕获 (保持原始像素清晰度)
+            finalSize = orgW;
+        }
+        // =========================================================
+
+        // 4. 根据最终决定的 finalSize 计算热点 (保持比例)
+        float scaleRatio = (float)finalSize / (float)orgW;
+        
+        int hotX = (int)(ii.xHotspot * scaleRatio);
+        int hotY = (int)(ii.yHotspot * scaleRatio);
+        
+        // 边界钳制
+        if (hotX >= finalSize) hotX = finalSize - 1;
+        if (hotY >= finalSize) hotY = finalSize - 1;
+
+        // 5. 准备绘图尺寸
+        int sheetW = finalSize;
+        int sheetH = finalSize * frames;
 
         // --- 优化 3: 资源复用 ---
-        // 只有当 sheetW 或 sheetH 发生变化时（极少），才分配内存
         if (!RecreateResources(sheetW, sheetH))
             return;
 
@@ -720,29 +746,30 @@ public:
         SelectObject(m_hMemDC, m_hBmpW);
         FillRect(m_hMemDC, &allRc, (HBRUSH)GetStockObject(WHITE_BRUSH));
 
-        // 绘制帧
+        // 绘制帧 (注意这里使用 finalSize 进行绘制)
         for (int i = 0; i < frames; ++i)
         {
-            int drawY = i * size;
+            int drawY = i * finalSize;
+            
+            // DrawIconEx 会自动根据 destWidth/destHeight (finalSize) 进行缩放
             SelectObject(m_hMemDC, m_hBmpB);
-            DrawIconEx(m_hMemDC, 0, drawY, ci.hCursor, size, size, i, NULL, DI_NORMAL);
+            DrawIconEx(m_hMemDC, 0, drawY, ci.hCursor, finalSize, finalSize, i, NULL, DI_NORMAL);
+            
             SelectObject(m_hMemDC, m_hBmpW);
-            DrawIconEx(m_hMemDC, 0, drawY, ci.hCursor, size, size, i, NULL, DI_NORMAL);
+            DrawIconEx(m_hMemDC, 0, drawY, ci.hCursor, finalSize, finalSize, i, NULL, DI_NORMAL);
         }
 
-        // 像素提取
+        // 像素提取 (后续逻辑保持不变)
         uint32_t *pxB = (uint32_t *)m_pBitsB;
         uint32_t *pxW = (uint32_t *)m_pBitsW;
         int totalPixels = sheetW * sheetH;
         std::vector<uint32_t> rawPixels(totalPixels);
 
-        // 使用指针遍历优化，避免数组索引乘法开销
         for (int i = 0; i < totalPixels; ++i)
         {
             uint32_t cB = pxB[i];
             uint32_t cW = pxW[i];
 
-            // 提取 BGR 分量 (Windows DIBSection 通常是 BGR 顺序)
             uint8_t bb = (cB & 0xFF);
             uint8_t bg = ((cB >> 8) & 0xFF);
             uint8_t br = ((cB >> 16) & 0xFF);
@@ -751,74 +778,43 @@ public:
             uint8_t wg = ((cW >> 8) & 0xFF);
             uint8_t wr = ((cW >> 16) & 0xFF);
 
-            // ==========================================================
-            //  修复核心：检测 XOR 反色像素
-            // ==========================================================
-            // 特征：在黑色背景下很亮(>200)，在白色背景下很暗(<50)
-            // 也就是物理上发生了反转。
-            // ==========================================================
+            // 处理 XOR 反色像素 (I-Beam 等)
             if (bg > 200 && wg < 50)
             {
-                // 这是一个反色像素 (I-Beam 的本体)
-                // 既然 PNG 无法反色，我们需要强制给它一个“中间色”。
-                // 方案 A: 深灰色 (100, 100, 100) -> 在白底/黑底都可见
-                // 方案 B: 系统蓝 (0, 120, 215) -> 类似现代文本选择色
-
-                // 这里使用方案 A (灰色)，最稳妥，看起来像是一个带阴影的光标
                 uint8_t safeColor = 100;
                 rawPixels[i] = (255 << 24) | (safeColor << 16) | (safeColor << 8) | safeColor;
                 continue;
             }
 
-            // ==========================================================
-            //  常规 Alpha 混合提取算法
-            // ==========================================================
-            // 标准公式: OnWhite = OnBlack * Alpha + 255 * (1 - Alpha)
-            // 差异 Diff = OnWhite - OnBlack = 255 - 255 * Alpha
-            // Alpha = 1 - (Diff / 255)
-
+            // Alpha 提取
             int dr = (int)wr - (int)br;
             int dg = (int)wg - (int)bg;
             int db = (int)wb - (int)bb;
 
-            // 如果在白底上的值比黑底还小(也就是 dr/dg/db 为负数)，
-            // 说明这不仅仅是简单的 Alpha 混合，可能包含部分反色或异常。
-            // 我们将其视为不透明度极高，或直接钳制为 0。
-            if (dr < 0)
-                dr = 0;
-            if (dg < 0)
-                dg = 0;
-            if (db < 0)
-                db = 0;
+            if (dr < 0) dr = 0;
+            if (dg < 0) dg = 0;
+            if (db < 0) db = 0;
 
-            // 取最大差异作为 Alpha 的依据
             int maxDiff = dr;
-            if (dg > maxDiff)
-                maxDiff = dg;
-            if (db > maxDiff)
-                maxDiff = db;
+            if (dg > maxDiff) maxDiff = dg;
+            if (db > maxDiff) maxDiff = db;
 
-            // 计算 Alpha
             uint8_t alpha = (uint8_t)(255 - maxDiff);
 
-            if (alpha > 5) // 忽略极低透明度的噪点
+            if (alpha > 5)
             {
-                // 如果需要严格还原颜色：
-                // RealColor = OnBlack / (Alpha/255.0)
-                // 但直接使用 OnBlack (br, bg, bb) 通常效果更好（也就是 Pre-multiplied Alpha 的视觉效果）
                 rawPixels[i] = (alpha << 24) | (br << 16) | (bg << 8) | bb;
             }
             else
             {
-                rawPixels[i] = 0; // 完全透明
+                rawPixels[i] = 0;
             }
         }
 
-        // 计算 Hash
+        // 计算 Hash 并发送
         size_t rawDataSize = rawPixels.size() * 4;
         uint32_t hash = CalculateCRC32(std::vector<uint8_t>((uint8_t *)rawPixels.data(), (uint8_t *)rawPixels.data() + rawDataSize));
 
-        // 生成 PNG (如果缓存没有)
         std::vector<uint8_t> png;
         if (!m_net.GetCachedPng(hash, png))
         {
@@ -845,19 +841,13 @@ public:
             m_net.CachePng(hash, png);
         }
 
-        // 发送并更新状态
         if (!png.empty())
         {
-            mLastCursor = ci.hCursor; // 更新句柄缓存，阻止下次重复计算
-
+            mLastCursor = ci.hCursor;
             if (frames > 1)
-            {
-                Logger::Get().Debug("发送动画 | Hash:", hash, " 帧数:", frames);
-            }
+                Logger::Get().Debug("发送动画 | Hash:", hash, " 尺寸:", finalSize, " 帧数:", frames);
             else
-            {
-                Logger::Get().Debug("发送静态 | Hash:", hash);
-            }
+                Logger::Get().Debug("发送静态 | Hash:", hash, " 尺寸:", finalSize);
 
             m_net.BroadcastCursor(hash, hotX, hotY, frames, delay, png);
         }
