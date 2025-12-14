@@ -299,6 +299,11 @@ public:
                     m_clients.push_back(session);
                 }
 
+                if (g_engine)
+                {
+                    g_engine->ResetState();
+                }
+
                 // 唤醒主线程立即发送当前光标
                 {
                     std::lock_guard<std::mutex> lock(g_mutexCursor);
@@ -629,6 +634,11 @@ public:
         Gdiplus::GdiplusShutdown(m_token);
     }
 
+    void ResetState()
+    {
+        mLastCursor = NULL;
+    }
+
     void CaptureAndSend()
     {
         // --- 优化 1: 频率限制 (Debounce) ---
@@ -724,17 +734,76 @@ public:
             uint32_t cB = pxB[i];
             uint32_t cW = pxW[i];
 
-            uint8_t bb = (cB & 0xFF), bg = ((cB >> 8) & 0xFF), br = ((cB >> 16) & 0xFF);
-            uint8_t wb = (cW & 0xFF), wg = ((cW >> 8) & 0xFF), wr = ((cW >> 16) & 0xFF);
+            // 提取 BGR 分量 (Windows DIBSection 通常是 BGR 顺序)
+            uint8_t bb = (cB & 0xFF);
+            uint8_t bg = ((cB >> 8) & 0xFF);
+            uint8_t br = ((cB >> 16) & 0xFF);
 
-            int dr = wr - br, dg = wg - bg, db = wb - bb;
-            // 简单的数学优化
-            int maxDiff = (dr > dg) ? dr : dg;
+            uint8_t wb = (cW & 0xFF);
+            uint8_t wg = ((cW >> 8) & 0xFF);
+            uint8_t wr = ((cW >> 16) & 0xFF);
+
+            // ==========================================================
+            //  修复核心：检测 XOR 反色像素
+            // ==========================================================
+            // 特征：在黑色背景下很亮(>200)，在白色背景下很暗(<50)
+            // 也就是物理上发生了反转。
+            // ==========================================================
+            if (bg > 200 && wg < 50)
+            {
+                // 这是一个反色像素 (I-Beam 的本体)
+                // 既然 PNG 无法反色，我们需要强制给它一个“中间色”。
+                // 方案 A: 深灰色 (100, 100, 100) -> 在白底/黑底都可见
+                // 方案 B: 系统蓝 (0, 120, 215) -> 类似现代文本选择色
+
+                // 这里使用方案 A (灰色)，最稳妥，看起来像是一个带阴影的光标
+                uint8_t safeColor = 100;
+                rawPixels[i] = (255 << 24) | (safeColor << 16) | (safeColor << 8) | safeColor;
+                continue;
+            }
+
+            // ==========================================================
+            //  常规 Alpha 混合提取算法
+            // ==========================================================
+            // 标准公式: OnWhite = OnBlack * Alpha + 255 * (1 - Alpha)
+            // 差异 Diff = OnWhite - OnBlack = 255 - 255 * Alpha
+            // Alpha = 1 - (Diff / 255)
+
+            int dr = (int)wr - (int)br;
+            int dg = (int)wg - (int)bg;
+            int db = (int)wb - (int)bb;
+
+            // 如果在白底上的值比黑底还小(也就是 dr/dg/db 为负数)，
+            // 说明这不仅仅是简单的 Alpha 混合，可能包含部分反色或异常。
+            // 我们将其视为不透明度极高，或直接钳制为 0。
+            if (dr < 0)
+                dr = 0;
+            if (dg < 0)
+                dg = 0;
+            if (db < 0)
+                db = 0;
+
+            // 取最大差异作为 Alpha 的依据
+            int maxDiff = dr;
+            if (dg > maxDiff)
+                maxDiff = dg;
             if (db > maxDiff)
                 maxDiff = db;
 
-            uint8_t alpha = (uint8_t)(255 - (maxDiff < 0 ? 0 : (maxDiff > 255 ? 255 : maxDiff)));
-            rawPixels[i] = (alpha << 24) | (br << 16) | (bg << 8) | bb;
+            // 计算 Alpha
+            uint8_t alpha = (uint8_t)(255 - maxDiff);
+
+            if (alpha > 5) // 忽略极低透明度的噪点
+            {
+                // 如果需要严格还原颜色：
+                // RealColor = OnBlack / (Alpha/255.0)
+                // 但直接使用 OnBlack (br, bg, bb) 通常效果更好（也就是 Pre-multiplied Alpha 的视觉效果）
+                rawPixels[i] = (alpha << 24) | (br << 16) | (bg << 8) | bb;
+            }
+            else
+            {
+                rawPixels[i] = 0; // 完全透明
+            }
         }
 
         // 计算 Hash
