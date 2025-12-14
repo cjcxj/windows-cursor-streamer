@@ -706,33 +706,37 @@ void CaptureAndSend()
         // =========================================================
         //           核心逻辑修改：判断使用系统大小还是原始大小
         // =========================================================
-        int finalSize = 0;
+        int finalSizeW = 0;
+        int finalSizeH = 0;
 
         // 逻辑：如果获取的大小等于32 或者 等于注册表大小 -> 视为系统光标，使用注册表大小捕获 (支持 DPI 缩放)
         if (orgW == 32 || orgW == regSize)
         {
-            finalSize = regSize; 
+            finalSizeW = regSize;
+            finalSizeH = regSize;  
         }
         else
         {
             // 反之 -> 视为自定义光标 (如游戏光标)，使用获取的大小捕获 (保持原始像素清晰度)
-            finalSize = orgW;
+            finalSizeW = orgW;
+            finalSizeH = orgH;
         }
         // =========================================================
 
         // 4. 根据最终决定的 finalSize 计算热点 (保持比例)
-        float scaleRatio = (float)finalSize / (float)orgW;
+        float scaleRatioW = (float)finalSizeW / (float)orgW;
+        float scaleRatioH = (float)finalSizeH / (float)orgH;
         
-        int hotX = (int)(ii.xHotspot * scaleRatio);
-        int hotY = (int)(ii.yHotspot * scaleRatio);
+        int hotX = (int)(ii.xHotspot * scaleRatioW);
+        int hotY = (int)(ii.yHotspot * scaleRatioH);
         
         // 边界钳制
-        if (hotX >= finalSize) hotX = finalSize - 1;
-        if (hotY >= finalSize) hotY = finalSize - 1;
+        if (hotX >= finalSizeW) hotX = finalSizeW - 1;
+        if (hotY >= finalSizeH) hotY = finalSizeH - 1;
 
         // 5. 准备绘图尺寸
-        int sheetW = finalSize;
-        int sheetH = finalSize * frames;
+        int sheetW = finalSizeW;
+        int sheetH = finalSizeH * frames;
 
         // --- 优化 3: 资源复用 ---
         if (!RecreateResources(sheetW, sheetH))
@@ -749,14 +753,14 @@ void CaptureAndSend()
         // 绘制帧 (注意这里使用 finalSize 进行绘制)
         for (int i = 0; i < frames; ++i)
         {
-            int drawY = i * finalSize;
+            int drawY = i * finalSizeH;
             
             // DrawIconEx 会自动根据 destWidth/destHeight (finalSize) 进行缩放
             SelectObject(m_hMemDC, m_hBmpB);
-            DrawIconEx(m_hMemDC, 0, drawY, ci.hCursor, finalSize, finalSize, i, NULL, DI_NORMAL);
+            DrawIconEx(m_hMemDC, 0, drawY, ci.hCursor, finalSizeW, finalSizeH, i, NULL, DI_NORMAL);
             
             SelectObject(m_hMemDC, m_hBmpW);
-            DrawIconEx(m_hMemDC, 0, drawY, ci.hCursor, finalSize, finalSize, i, NULL, DI_NORMAL);
+            DrawIconEx(m_hMemDC, 0, drawY, ci.hCursor, finalSizeW, finalSizeH, i, NULL, DI_NORMAL);
         }
 
         // 像素提取 (后续逻辑保持不变)
@@ -845,9 +849,9 @@ void CaptureAndSend()
         {
             mLastCursor = ci.hCursor;
             if (frames > 1)
-                Logger::Get().Debug("发送动画 | Hash:", hash, " 尺寸:", finalSize, " 帧数:", frames);
+                Logger::Get().Debug("发送动画 | Hash:", hash, " 尺寸:", finalSizeW, "x", finalSizeH, " 帧数:", frames);
             else
-                Logger::Get().Debug("发送静态 | Hash:", hash, " 尺寸:", finalSize);
+                Logger::Get().Debug("发送静态 | Hash:", hash, " 尺寸:", finalSizeW, "x", finalSizeH);
 
             m_net.BroadcastCursor(hash, hotX, hotY, frames, delay, png);
         }
