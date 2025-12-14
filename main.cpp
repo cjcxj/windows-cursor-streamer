@@ -42,6 +42,7 @@
 #include <sstream>
 #include <memory>
 #include <fstream>
+#include <functional>
 
 // 3. 链接库
 #pragma comment(lib, "ws2_32.lib")
@@ -215,8 +216,15 @@ class NetworkManager
 
 public:
     NetworkManager() : m_listenSocket(INVALID_SOCKET) {}
+    std::function<void()> m_onClientConnected;
 
     // 1. 初始化 TCP 服务端
+
+    void SetClientConnectedCallback(std::function<void()> callback)
+    {
+        m_onClientConnected = callback;
+    }
+
     bool Initialize()
     {
         WSADATA wsaData;
@@ -299,9 +307,9 @@ public:
                     m_clients.push_back(session);
                 }
 
-                if (g_engine)
+                if (m_onClientConnected)
                 {
-                    g_engine->ResetState();
+                    m_onClientConnected();
                 }
 
                 // 唤醒主线程立即发送当前光标
@@ -939,6 +947,14 @@ int main(int argc, char *argv[])
     if (!g_net.Initialize())
         return 1;
     g_engine = std::make_unique<CursorEngine>(g_net);
+
+    g_net.SetClientConnectedCallback([]()
+                                     {
+        if (g_engine)
+        {
+            g_engine->ResetState();
+            Logger::Get().Info("新客户端连接，强制刷新光标状态");
+        } });
 
     // 启动线程
     std::thread t1(Worker);
