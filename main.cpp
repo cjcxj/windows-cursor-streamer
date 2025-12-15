@@ -699,7 +699,8 @@ public:
 
         // 获取当前 DPI 和 目标尺寸
         UINT currentDpi = GetCursorMonitorDPI();
-        int expectedTierSize = GetExpectedSystemCursorSize(currentDpi, 32); // 假设基础是32
+        // 计算当前 DPI 下，Windows 最可能加载的“标准档位尺寸”
+        int expectedTierSize = GetExpectedSystemCursorSize(currentDpi, 32);
 
         // 注意：这里我们还需要简单判断一下是否是自定义光标来决定最终尺寸，
         // 为了性能，我们可以先简单用 expectedTierSize 做指纹判断。
@@ -749,12 +750,6 @@ public:
         // =========================================================
         int finalSizeW = 0;
         int finalSizeH = 0;
-
-        // 获取当前屏幕 DPI
-        UINT currentDpi = GetCursorMonitorDPI();
-
-        // 计算当前 DPI 下，Windows 最可能加载的“标准档位尺寸”
-        int expectedTierSize = GetExpectedSystemCursorSize(currentDpi, 32);
 
         // 判断逻辑
         bool isSystemCursor = (orgW == 32 || orgW == regSize || orgW == expectedTierSize);
