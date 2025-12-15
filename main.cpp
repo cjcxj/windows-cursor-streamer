@@ -498,7 +498,7 @@ public:
 };
 
 // ==========================================
-//           4. 光标引擎 (Sprite Sheet Generator)
+//           4. 光标引擎 (高性能优化版)
 // ==========================================
 
 // user32.dll 未公开 API 定义
@@ -513,63 +513,62 @@ class CursorEngine
 
     // --- 状态缓存 ---
     HCURSOR mLastCursor = NULL;
-    // 上一次处理的时间点
+    int mLastTierSize = -1; // 上一次的档位
     std::chrono::steady_clock::time_point mLastProcessTime;
+    
+    // DPI 缓存优化
+    HMONITOR mLastMonitor = NULL;
+    UINT mLastDpi = 96;
+    
+    // 防抖与重启逻辑
+    std::chrono::steady_clock::time_point m_dpiChangeStartTime;
+    bool m_isDpiChanging = false;
 
     // --- GDI 资源池 (避免重复创建销毁) ---
     HDC m_hMemDC = NULL;
     HBITMAP m_hBmpB = NULL;
     HBITMAP m_hBmpW = NULL;
-    HGDIOBJ m_hOldB = NULL;
-    HGDIOBJ m_hOldW = NULL;
     void *m_pBitsB = NULL;
     void *m_pBitsW = NULL;
     int m_cachedWidth = 0;
-    int m_cachedHeight = 0; // 单帧高度
-    int mLastSize = 0;      // 记录上一次处理的目标尺寸
+    int m_cachedHeight = 0; 
 
-    // 记录上一帧的档位大小
-    int m_lastTierSize = -1;
+    // --- 内存复用池 (避免每帧 malloc) ---
+    std::vector<uint32_t> m_rawPixels;  // 复用的像素缓冲区
+    std::vector<uint8_t> m_xorMask;     // 复用的掩码缓冲区
+    std::vector<uint8_t> m_pngBuffer;   // 复用的 PNG 输出缓冲区
 
-    // 防抖计时器：防止在两个屏幕交界处来回滑动鼠标导致疯狂重启
-    std::chrono::steady_clock::time_point m_dpiChangeStartTime;
-    bool m_isDpiChanging = false;
-
+    // 辅助：获取编码器 CLSID
     static int GetEncoderClsid(const WCHAR *format, CLSID *pClsid)
     {
         UINT num, size;
         Gdiplus::GetImageEncodersSize(&num, &size);
-        if (size == 0)
-            return -1;
+        if (size == 0) return -1;
         std::vector<char> buf(size);
         Gdiplus::ImageCodecInfo *p = (Gdiplus::ImageCodecInfo *)buf.data();
         Gdiplus::GetImageEncoders(num, size, p);
-        for (UINT j = 0; j < num; ++j)
-            if (wcscmp(p[j].MimeType, format) == 0)
-            {
+        for (UINT j = 0; j < num; ++j) {
+            if (wcscmp(p[j].MimeType, format) == 0) {
                 *pClsid = p[j].Clsid;
                 return j;
             }
+        }
         return -1;
     }
 
-    // 重新初始化 GDI 资源 (仅当尺寸变化时调用)
+    // 重新初始化 GDI 资源
     bool RecreateResources(int w, int hTotal)
     {
-        // 如果尺寸没变且资源存在，直接复用
         if (m_hMemDC && m_hBmpB && m_hBmpW && w == m_cachedWidth && hTotal == m_cachedHeight)
-        {
             return true;
-        }
 
-        FreeResources(); // 先清理旧的
+        FreeResources();
 
         HDC hScreen = GetDC(NULL);
         m_hMemDC = CreateCompatibleDC(hScreen);
         ReleaseDC(NULL, hScreen);
 
-        if (!m_hMemDC)
-            return false;
+        if (!m_hMemDC) return false;
 
         BITMAPINFOHEADER bi = {sizeof(bi)};
         bi.biWidth = w;
@@ -581,8 +580,7 @@ class CursorEngine
         m_hBmpB = CreateDIBSection(m_hMemDC, (BITMAPINFO *)&bi, DIB_RGB_COLORS, &m_pBitsB, NULL, 0);
         m_hBmpW = CreateDIBSection(m_hMemDC, (BITMAPINFO *)&bi, DIB_RGB_COLORS, &m_pBitsW, NULL, 0);
 
-        if (!m_hBmpB || !m_hBmpW)
-        {
+        if (!m_hBmpB || !m_hBmpW) {
             FreeResources();
             return false;
         }
@@ -594,36 +592,26 @@ class CursorEngine
 
     void FreeResources()
     {
-        if (m_hMemDC)
-        {
-            DeleteDC(m_hMemDC);
-            m_hMemDC = NULL;
-        }
-        if (m_hBmpB)
-        {
-            DeleteObject(m_hBmpB);
-            m_hBmpB = NULL;
-        }
-        if (m_hBmpW)
-        {
-            DeleteObject(m_hBmpW);
-            m_hBmpW = NULL;
-        }
+        if (m_hMemDC) DeleteDC(m_hMemDC);
+        if (m_hBmpB) DeleteObject(m_hBmpB);
+        if (m_hBmpW) DeleteObject(m_hBmpW);
+        m_hMemDC = NULL;
+        m_hBmpB = NULL;
+        m_hBmpW = NULL;
         m_pBitsB = NULL;
         m_pBitsW = NULL;
         m_cachedWidth = 0;
         m_cachedHeight = 0;
     }
 
+    // 优化：带缓存的注册表读取 (每5秒检查一次)
     int GetTargetSize()
     {
-        // 简单缓存注册表读取，避免每次读注册表
         static int s_size = 32;
         static auto s_lastCheck = std::chrono::steady_clock::now();
         auto now = std::chrono::steady_clock::now();
 
-        // 每 2 秒才读一次注册表
-        if (std::chrono::duration_cast<std::chrono::seconds>(now - s_lastCheck).count() > 2)
+        if (std::chrono::duration_cast<std::chrono::seconds>(now - s_lastCheck).count() > 5)
         {
             s_lastCheck = now;
             HKEY k;
@@ -638,62 +626,45 @@ class CursorEngine
         return std::clamp(s_size, 32, 256);
     }
 
-    // 获取光标当前所在显示器的 DPI
+    // 优化：DPI 查询缓存
     UINT GetCursorMonitorDPI()
     {
         POINT pt;
-        // 获取光标位置
         if (GetCursorPos(&pt))
         {
-            // 获取该点所在的显示器句柄
             HMONITOR hMon = MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST);
-            if (hMon)
+            // 只有当显示器句柄变化时，才重新查询 DPI (昂贵操作)
+            if (hMon != mLastMonitor) 
             {
                 UINT dpiX, dpiY;
-                // 获取该显示器的有效 DPI
                 if (SUCCEEDED(GetDpiForMonitor(hMon, MDT_EFFECTIVE_DPI, &dpiX, &dpiY)))
                 {
-                    return dpiX;
+                    mLastDpi = dpiX;
+                    mLastMonitor = hMon;
                 }
             }
         }
-        return 96; // 默认 100%
+        return mLastDpi;
     }
 
-    // 根据 DPI 计算预期的系统光标档位 (32, 48, 64, 96)
+    // 根据 DPI 计算预期的系统光标档位
     int GetExpectedSystemCursorSize(int baseSize, UINT dpi)
     {
-        // 1. 计算理论上的线性缩放大小
         int calculated = MulDiv(baseSize, dpi, 96);
-
-        // 2. 向下取整/阶梯匹配逻辑 (模拟 Windows 资源加载策略)
-        // 即使 DPI 很高，如果计算出来是 42，Windows 可能还是用的 32 的资源
-        // 只有达到了 48 的阈值，才会切到 48 的资源
-
-        if (calculated >= 96)
-            return 96;
-        if (calculated >= 64)
-            return 64;
-        if (calculated >= 48)
-            return 48;
-
-        // 默认档位
+        if (calculated >= 96) return 96;
+        if (calculated >= 64) return 64;
+        if (calculated >= 48) return 48;
         return 32;
     }
 
     std::pair<int, int> GetAnimInfo(HCURSOR h)
     {
-        if (!m_pGetCursorFrameInfo)
-            return {1, 0};
+        if (!m_pGetCursorFrameInfo) return {1, 0};
         DWORD rate = 0, count = 0;
-        if (m_pGetCursorFrameInfo(h, 0, 0, &rate, &count))
-        {
-            if (count == 0)
-                count = 1;
+        if (m_pGetCursorFrameInfo(h, 0, 0, &rate, &count)) {
+            if (count == 0) count = 1;
             int delay = (int)((rate * 1000) / 60);
-            if (delay < 10)
-                delay = 0;
-            return {(int)count, delay};
+            return {(int)count, delay < 10 ? 0 : delay};
         }
         return {1, 0};
     }
@@ -707,213 +678,152 @@ public:
         if (m_hUser32)
             m_pGetCursorFrameInfo = (GETCURSORFRAMEINFO)GetProcAddress(m_hUser32, "GetCursorFrameInfo");
         mLastProcessTime = std::chrono::steady_clock::now();
+        
+        // 预分配内存，减少运行时重新分配
+        m_rawPixels.reserve(128 * 128); 
+        m_xorMask.reserve(128 * 128);
+        m_pngBuffer.reserve(1024 * 50);
     }
 
     ~CursorEngine()
     {
         FreeResources();
-        if (m_hUser32)
-            FreeLibrary(m_hUser32);
+        if (m_hUser32) FreeLibrary(m_hUser32);
         Gdiplus::GdiplusShutdown(m_token);
     }
 
     void ResetState()
     {
         mLastCursor = NULL;
-        mLastSize = 0; // 重置
+        // 注意：不重置 mLastMonitor/DPI，因为物理屏幕没变
     }
 
     void CaptureAndSend()
     {
+        // 1. 基础频率限制 (33ms)
         auto now = std::chrono::steady_clock::now();
         if (std::chrono::duration_cast<std::chrono::milliseconds>(now - mLastProcessTime).count() < 30)
-        {
             return;
-        }
         mLastProcessTime = now;
 
         CURSORINFO ci = {sizeof(ci)};
-        if (!GetCursorInfo(&ci) || !(ci.flags & CURSOR_SHOWING))
-            return;
+        if (!GetCursorInfo(&ci) || !(ci.flags & CURSOR_SHOWING)) return;
 
-        // 获取当前 DPI 和 目标尺寸
+        // 2. DPI 检查 (使用优化后的带缓存版本)
         UINT currentDpi = GetCursorMonitorDPI();
-        // 计算当前 DPI 下，Windows 最可能加载的“标准档位尺寸”
         int expectedTierSize = GetExpectedSystemCursorSize(currentDpi, 32);
 
-        // 2. 初始化（第一次运行）
-        if (m_lastTierSize == -1)
-        {
-            m_lastTierSize = expectedTierSize;
-        }
+        // 初始化
+        if (mLastTierSize == -1) mLastTierSize = expectedTierSize;
 
-        // 3. 检测变化并重启
-        if (expectedTierSize != m_lastTierSize)
+        // 3. 档位变化与防抖 (DPI 切换逻辑)
+        if (expectedTierSize != mLastTierSize)
         {
-            // 进入防抖逻辑
-            if (!m_isDpiChanging)
-            {
+            if (!m_isDpiChanging) {
                 m_isDpiChanging = true;
-                m_dpiChangeStartTime = std::chrono::steady_clock::now();
-                Logger::Get().Debug("检测到 DPI 变化 (", m_lastTierSize, "->", expectedTierSize, ")，等待稳定...");
-            }
-            else
-            {
-                // 如果变化状态持续了超过 500ms (防止在边界抖动)
-                auto now = std::chrono::steady_clock::now();
-                if (std::chrono::duration_cast<std::chrono::milliseconds>(now - m_dpiChangeStartTime).count() > 500)
-                {
-                    // 确认变化稳定，执行重启！
+                m_dpiChangeStartTime = now;
+            } else {
+                if (std::chrono::duration_cast<std::chrono::milliseconds>(now - m_dpiChangeStartTime).count() > 500) {
                     RestartApplication();
                 }
             }
-            
-            // 在 DPI 变化期间，暂停处理光标，直接返回，避免发送错误大小的图像
-            return;
+            return; 
         }
-        else
-        {
-            // 状态稳定或已恢复
+        else {
             m_isDpiChanging = false;
         }
 
-        // 注意：这里我们还需要简单判断一下是否是自定义光标来决定最终尺寸，
-        // 为了性能，我们可以先简单用 expectedTierSize 做指纹判断。
-        // 如果系统光标句柄没变，且预期档位没变，才算没变。
+        // 4. 极速早期退出：如果句柄没变且DPI没变，直接返回 (0 CPU 消耗)
+        if (ci.hCursor == mLastCursor) return;
 
-        // 同时检查句柄 和 尺寸
-        if (ci.hCursor == mLastCursor && expectedTierSize == mLastSize)
-        {
-            return;
-        }
+        // ==========================================
+        //  进入重绘流程 (只有光标真正改变时才执行)
+        // ==========================================
 
-        // 获取注册表的大小 (系统光标缩放大小)
         int regSize = GetTargetSize();
-
-        // 获取动画帧数
         auto [frames, delay] = GetAnimInfo(ci.hCursor);
 
-        // 获取光标原始物理尺寸
         ICONINFO ii = {0};
-        GetIconInfo(ci.hCursor, &ii);
+        if (!GetIconInfo(ci.hCursor, &ii)) return; // 失败保护
 
-        int orgW = 32; // 默认为 32
-        int orgH = 32;
+        int orgW = 32, orgH = 32;
         BITMAP bmp;
+        bool hasColor = false;
 
-        // 尝试获取 Color 位图信息
-        if (ii.hbmColor && GetObject(ii.hbmColor, sizeof(bmp), &bmp))
-        {
+        if (ii.hbmColor && GetObject(ii.hbmColor, sizeof(bmp), &bmp)) {
             orgW = bmp.bmWidth;
             orgH = bmp.bmHeight;
-        }
-        // 如果没有 Color (黑白光标)，尝试获取 Mask 位图信息
-        else if (ii.hbmMask && GetObject(ii.hbmMask, sizeof(bmp), &bmp))
-        {
+            hasColor = true;
+        } else if (ii.hbmMask && GetObject(ii.hbmMask, sizeof(bmp), &bmp)) {
             orgW = bmp.bmWidth;
-            orgH = bmp.bmHeight / 2; // Mask 高度通常是双倍的
+            orgH = bmp.bmHeight / 2;
         }
 
-        // 这里的 hbmColor 和 hbmMask 用完需要释放，防止内存泄漏
-        if (ii.hbmColor)
-            DeleteObject(ii.hbmColor);
-        if (ii.hbmMask)
-            DeleteObject(ii.hbmMask);
+        // 资源清理 RAII 替代
+        if (ii.hbmColor) DeleteObject(ii.hbmColor);
+        if (ii.hbmMask) DeleteObject(ii.hbmMask);
 
-        // =========================================================
-        //           核心逻辑修改：基于 DPI 阶梯的系统光标判断
-        // =========================================================
-        int finalSizeW = 0;
-        int finalSizeH = 0;
-
-        // 判断逻辑
+        // 计算最终尺寸
+        int finalSizeW = orgW;
+        int finalSizeH = orgH;
         bool isSystemCursor = (orgW == 32 || orgW == regSize || orgW == expectedTierSize);
-        // 高dpi下的注册表光标大小倍率
-        double scaleFactor = expectedTierSize / 32.0;
-
-        // 格式：[DPI检测] DPI:144 | 档位:48 | 实际:48x48 -> SYSTEM (重置为32)
-        Logger::Get().Debug(
-            "[DPI检测]",
-            "DPI:", currentDpi,
-            "| 预测档位:", expectedTierSize,
-            "| 实际尺寸:", orgW, "x", orgH,
-            "->", isSystemCursor ? "SYSTEM (缩放)" : "CUSTOM (保持)");
-
-        if (isSystemCursor)
-        {
-            // 判定为系统光标：
-            // 这样客户端在 100% 缩放的电脑上看着才正常
-            finalSizeW = int(regSize * scaleFactor);
-            finalSizeH = int(regSize * scaleFactor);
+        
+        if (isSystemCursor) {
+             double scaleFactor = expectedTierSize / 32.0;
+             finalSizeW = int(regSize * scaleFactor);
+             finalSizeH = int(regSize * scaleFactor);
         }
-        else
-        {
-            // 判定为自定义光标：
-            // 例如游戏里的特殊光标，或者非标准尺寸的光标 (如 40, 50, 128 等)
-            // 保持原始物理分辨率，确保高清不模糊
-            finalSizeW = orgW;
-            finalSizeH = orgH;
-        }
-        // =========================================================
 
-        // 根据最终决定的 finalSize 计算热点 (保持比例)
+        // 热点计算
         float scaleRatioW = (float)finalSizeW / (float)orgW;
         float scaleRatioH = (float)finalSizeH / (float)orgH;
+        int hotX = std::clamp((int)(ii.xHotspot * scaleRatioW), 0, finalSizeW - 1);
+        int hotY = std::clamp((int)(ii.yHotspot * scaleRatioH), 0, finalSizeH - 1);
 
-        int hotX = (int)(ii.xHotspot * scaleRatioW);
-        int hotY = (int)(ii.yHotspot * scaleRatioH);
-
-        // 边界钳制
-        if (hotX >= finalSizeW)
-            hotX = finalSizeW - 1;
-        if (hotY >= finalSizeH)
-            hotY = finalSizeH - 1;
-
-        // 准备绘图尺寸
         int sheetW = finalSizeW;
         int sheetH = finalSizeH * frames;
 
-        if (!RecreateResources(sheetW, sheetH))
-            return;
+        // 准备 GDI 资源
+        if (!RecreateResources(sheetW, sheetH)) return;
 
-        // 绘制背景 (批量清空)
+        // 批量绘制
         RECT allRc = {0, 0, sheetW, sheetH};
+        
+        // 黑底
         SelectObject(m_hMemDC, m_hBmpB);
         FillRect(m_hMemDC, &allRc, (HBRUSH)GetStockObject(BLACK_BRUSH));
+        for (int i = 0; i < frames; ++i)
+            DrawIconEx(m_hMemDC, 0, i * finalSizeH, ci.hCursor, finalSizeW, finalSizeH, i, NULL, DI_NORMAL);
 
+        // 白底
         SelectObject(m_hMemDC, m_hBmpW);
         FillRect(m_hMemDC, &allRc, (HBRUSH)GetStockObject(WHITE_BRUSH));
-
-        // 绘制帧 (注意这里使用 finalSize 进行绘制)
         for (int i = 0; i < frames; ++i)
-        {
-            int drawY = i * finalSizeH;
-
-            // DrawIconEx 会自动根据 destWidth/destHeight (finalSize) 进行缩放
-            SelectObject(m_hMemDC, m_hBmpB);
-            DrawIconEx(m_hMemDC, 0, drawY, ci.hCursor, finalSizeW, finalSizeH, i, NULL, DI_NORMAL);
-
-            SelectObject(m_hMemDC, m_hBmpW);
-            DrawIconEx(m_hMemDC, 0, drawY, ci.hCursor, finalSizeW, finalSizeH, i, NULL, DI_NORMAL);
-        }
+            DrawIconEx(m_hMemDC, 0, i * finalSizeH, ci.hCursor, finalSizeW, finalSizeH, i, NULL, DI_NORMAL);
 
         // =========================================================
-        //           像素提取与智能描边 (解决白底看不清问题)
+        //           高性能像素处理 (指针操作 + 内存复用)
         // =========================================================
 
-        uint32_t *pxB = (uint32_t *)m_pBitsB;
-        uint32_t *pxW = (uint32_t *)m_pBitsW;
         int totalPixels = sheetW * sheetH;
+        
+        // 复用 vector 内存，避免 malloc
+        m_rawPixels.resize(totalPixels);
+        m_xorMask.resize(totalPixels);
+        
+        // 使用裸指针遍历，速度最快
+        uint32_t *pOut = m_rawPixels.data();
+        uint8_t  *pMask = m_xorMask.data();
+        const uint32_t *pB = (const uint32_t *)m_pBitsB;
+        const uint32_t *pW = (const uint32_t *)m_pBitsW;
 
-        std::vector<uint32_t> rawPixels(totalPixels, 0); // 初始化全透明
-        std::vector<uint8_t> xorMask(totalPixels, 0);    // 标记哪些点是反色核心
-
-        // --- 第一遍：提取颜色并标记反色区域 ---
+        // --- Pass 1: 颜色提取 ---
         for (int i = 0; i < totalPixels; ++i)
         {
-            uint32_t cB = pxB[i];
-            uint32_t cW = pxW[i];
+            uint32_t cB = pB[i];
+            uint32_t cW = pW[i];
 
+            // 提取分量 (假设 Little Endian: BGRA)
             uint8_t bb = (cB & 0xFF);
             uint8_t bg = ((cB >> 8) & 0xFF);
             uint8_t br = ((cB >> 16) & 0xFF);
@@ -922,77 +832,84 @@ public:
             uint8_t wg = ((cW >> 8) & 0xFF);
             uint8_t wr = ((cW >> 16) & 0xFF);
 
-            // 判定是否为 XOR 反色像素 (黑底极亮，白底极暗)
-            if (bg > 200 && wg < 50)
-            {
-                // 强制设为纯白 (核心颜色)
-                rawPixels[i] = 0xFFFFFFFF; // ARGB: 255, 255, 255, 255
-                xorMask[i] = 1;            // 标记这个点是核心
-                continue;
-            }
+            // 快速 XOR 检测 (分支预测优化: 大部分像素不是 XOR)
+            if (bg > 200 && wg < 50) {
+                pOut[i] = 0xFFFFFFFF; // 纯白
+                pMask[i] = 1;         // 标记
+            } else {
+                pMask[i] = 0;
+                // Alpha 提取优化：避免 std::max 和重复类型转换
+                int dr = (int)wr - br;
+                int dg = (int)wg - bg;
+                int db = (int)wb - bb;
+                
+                // 简单的 max 逻辑
+                if (dr < 0) dr = 0;
+                if (dg < 0) dg = 0;
+                if (db < 0) db = 0;
+                
+                int maxDiff = dr;
+                if (dg > maxDiff) maxDiff = dg;
+                if (db > maxDiff) maxDiff = db;
 
-            // 常规 Alpha 提取 (针对普通彩色光标)
-            int dr = (int)wr - (int)br;
-            int dg = (int)wg - (int)bg;
-            int db = (int)wb - (int)bb;
-            if (dr < 0)
-                dr = 0;
-            if (dg < 0)
-                dg = 0;
-            if (db < 0)
-                db = 0;
-            int maxDiff = std::max({dr, dg, db});
-            uint8_t alpha = (uint8_t)(255 - maxDiff);
+                uint8_t alpha = (uint8_t)(255 - maxDiff);
 
-            if (alpha > 5)
-            {
-                rawPixels[i] = (alpha << 24) | (br << 16) | (bg << 8) | bb;
-            }
-        }
-
-        // --- 第二遍：给白色核心加黑色描边 ---
-        // 只有这样才能在纯白背景下看清纯白光标
-        for (int y = 0; y < sheetH; ++y)
-        {
-            for (int x = 0; x < sheetW; ++x)
-            {
-                int idx = y * sheetW + x;
-
-                // 如果当前像素已经有颜色了（是核心或普通光标），跳过
-                if (rawPixels[idx] != 0)
-                    continue;
-
-                // 检查上下左右是否有 XOR 核心像素
-                bool isBorder = false;
-                if (x > 0 && xorMask[idx - 1])
-                    isBorder = true;
-                else if (x < sheetW - 1 && xorMask[idx + 1])
-                    isBorder = true;
-                else if (y > 0 && xorMask[idx - sheetW])
-                    isBorder = true;
-                else if (y < sheetH - 1 && xorMask[idx + sheetW])
-                    isBorder = true;
-
-                if (isBorder)
-                {
-                    // 绘制纯黑边框 (不透明)
-                    rawPixels[idx] = 0xFF000000; // ARGB: 255, 0, 0, 0
+                if (alpha > 5) {
+                    pOut[i] = (alpha << 24) | (br << 16) | (bg << 8) | bb;
+                } else {
+                    pOut[i] = 0; // 完全透明
                 }
             }
         }
 
-        // 计算 Hash 并发送
-        size_t rawDataSize = rawPixels.size() * 4;
-        uint32_t hash = CalculateCRC32(std::vector<uint8_t>((uint8_t *)rawPixels.data(), (uint8_t *)rawPixels.data() + rawDataSize));
+        // --- Pass 2: 智能描边 (仅处理 XOR 边界) ---
+        // 优化：避免边界检查 if (x>0)，将循环范围缩小
+        int wMinus1 = sheetW - 1;
+        int hMinus1 = sheetH - 1;
 
-        std::vector<uint8_t> png;
-        if (!m_net.GetCachedPng(hash, png))
+        for (int y = 0; y < sheetH; ++y)
         {
+            // 计算行指针，减少乘法
+            uint32_t* rowOut = pOut + y * sheetW;
+            uint8_t*  rowMask = pMask + y * sheetW;
+            
+            // 指向上下行 Mask (注意边界)
+            uint8_t* rowMaskUp = (y > 0) ? (rowMask - sheetW) : NULL;
+            uint8_t* rowMaskDown = (y < hMinus1) ? (rowMask + sheetW) : NULL;
+
+            for (int x = 0; x < sheetW; ++x)
+            {
+                if (rowOut[x] != 0) continue; // 已有颜色跳过
+
+                bool isBorder = false;
+                // 左右
+                if (x > 0 && rowMask[x-1]) isBorder = true;
+                else if (x < wMinus1 && rowMask[x+1]) isBorder = true;
+                // 上下
+                else if (rowMaskUp && rowMaskUp[x]) isBorder = true;
+                else if (rowMaskDown && rowMaskDown[x]) isBorder = true;
+
+                if (isBorder) {
+                    rowOut[x] = 0xFF000000; // 纯黑边框
+                }
+            }
+        }
+
+        // CRC32 计算
+        size_t rawDataSize = m_rawPixels.size() * 4;
+        uint32_t hash = CalculateCRC32(std::vector<uint8_t>((uint8_t *)m_rawPixels.data(), (uint8_t *)m_rawPixels.data() + rawDataSize));
+
+        // 检查缓存或编码 PNG
+        m_pngBuffer.clear(); // 清空复用
+        if (!m_net.GetCachedPng(hash, m_pngBuffer))
+        {
+            // 只有未命中缓存时才调用 GDI+ 进行 PNG 编码
             Gdiplus::Bitmap gdiBmp(sheetW, sheetH, PixelFormat32bppARGB);
             Gdiplus::BitmapData bd;
             Gdiplus::Rect r(0, 0, sheetW, sheetH);
+            
             gdiBmp.LockBits(&r, Gdiplus::ImageLockModeWrite, PixelFormat32bppARGB, &bd);
-            memcpy(bd.Scan0, rawPixels.data(), rawDataSize);
+            memcpy(bd.Scan0, m_rawPixels.data(), rawDataSize); // 内存拷贝比逐点 SetPixel 快
             gdiBmp.UnlockBits(&bd);
 
             IStream *s = NULL;
@@ -1000,27 +917,29 @@ public:
             CLSID pngId;
             GetEncoderClsid(L"image/png", &pngId);
             gdiBmp.Save(s, &pngId, NULL);
+            
+            // 从流中提取数据
             STATSTG stg;
             s->Stat(&stg, STATFLAG_NONAME);
-            png.resize(stg.cbSize.LowPart);
+            
+            // 使用临时 buffer 读取流，然后放入 cache
+            std::vector<uint8_t> tempPng(stg.cbSize.LowPart);
             LARGE_INTEGER pos = {0};
             s->Seek(pos, STREAM_SEEK_SET, NULL);
             ULONG read;
-            s->Read(png.data(), (ULONG)png.size(), &read);
+            s->Read(tempPng.data(), (ULONG)tempPng.size(), &read);
             s->Release();
-            m_net.CachePng(hash, png);
+            
+            // 存入网络缓存
+            m_net.CachePng(hash, tempPng);
+            m_pngBuffer = std::move(tempPng);
         }
 
-        if (!png.empty())
+        if (!m_pngBuffer.empty())
         {
             mLastCursor = ci.hCursor;
-            mLastSize = expectedTierSize; 
-            if (frames > 1)
-                Logger::Get().Debug("发送动画 | Hash:", hash, " 尺寸:", finalSizeW, "x", finalSizeH, " 帧数:", frames);
-            else
-                Logger::Get().Debug("发送静态 | Hash:", hash, " 尺寸:", finalSizeW, "x", finalSizeH);
-
-            m_net.BroadcastCursor(hash, hotX, hotY, frames, delay, png);
+            Logger::Get().Debug("发送光标 Hash:", hash);
+            m_net.BroadcastCursor(hash, hotX, hotY, frames, delay, m_pngBuffer);
         }
     }
 };
