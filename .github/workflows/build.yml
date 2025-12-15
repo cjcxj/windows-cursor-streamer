@@ -3,9 +3,9 @@ name: Build Windows Exe
 # 触发条件：推送到 main 分支，或手动触发
 on:
   push:
-    branches: [ "反色光标" ]
+    branches: [ "最终版" ]
   pull_request:
-    branches: [ "反色光标" ]
+    branches: [ "最终版" ]
   workflow_dispatch:
 
 jobs:
