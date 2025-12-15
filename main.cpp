@@ -640,21 +640,35 @@ class CursorEngine
         return std::clamp(s_size, 32, 256);
     }
 
-    // 优化：DPI 查询缓存
+    // 获取光标当前所在显示器的 DPI
+    std::chrono::steady_clock::time_point mLastDpiCheckTime;
     UINT GetCursorMonitorDPI()
     {
         POINT pt;
         if (GetCursorPos(&pt))
         {
             HMONITOR hMon = MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST);
-            // 只有当显示器句柄变化时，才重新查询 DPI (昂贵操作)
-            if (hMon != mLastMonitor)
+            auto now = std::chrono::steady_clock::now();
+            
+            // 判断缓存是否失效：
+            // 1. 显示器句柄变了 (跨屏)
+            // 2. 或者，距离上次检查已经过了 2 秒 (定期刷新以检测同一屏幕的 DPI 变更)
+            bool isCacheStale = (hMon != mLastMonitor) || 
+                                (std::chrono::duration_cast<std::chrono::seconds>(now - mLastDpiCheckTime).count() >= 2);
+
+            if (isCacheStale)
             {
                 UINT dpiX, dpiY;
                 if (SUCCEEDED(GetDpiForMonitor(hMon, MDT_EFFECTIVE_DPI, &dpiX, &dpiY)))
                 {
+                    // 只有当数值真的变了，或者显示器变了才记录，方便调试
+                    if (dpiX != mLastDpi || hMon != mLastMonitor) {
+                        Logger::Get().Debug("DPI/显示器状态更新: ", dpiX);
+                    }
+
                     mLastDpi = dpiX;
                     mLastMonitor = hMon;
+                    mLastDpiCheckTime = now; // 更新检查时间
                 }
             }
         }
@@ -742,8 +756,8 @@ public:
             return;
 
         // 2. DPI 检查 (使用优化后的带缓存版本)
-        UINT currentDpi = GetCursorMonitorDPI();
-        int expectedTierSize = GetExpectedSystemCursorSize(currentDpi, 32);
+        UINT currentDpi = GetCursorMonitorDPI(); // 获取当前光标所在显示器的 DPI
+        int expectedTierSize = GetExpectedSystemCursorSize(currentDpi, 32); // 光标预期档位
 
         // 初始化
         if (mLastTierSize == -1)
