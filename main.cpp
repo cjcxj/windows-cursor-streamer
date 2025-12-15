@@ -494,6 +494,7 @@ class CursorEngine
     void *m_pBitsW = NULL;
     int m_cachedWidth = 0;
     int m_cachedHeight = 0; // 单帧高度
+    int mLastSize = 0;      // 记录上一次处理的目标尺寸
 
     static int GetEncoderClsid(const WCHAR *format, CLSID *pClsid)
     {
@@ -680,6 +681,7 @@ public:
     void ResetState()
     {
         mLastCursor = NULL;
+        mLastSize = 0; // 重置
     }
 
     void CaptureAndSend()
@@ -695,7 +697,16 @@ public:
         if (!GetCursorInfo(&ci) || !(ci.flags & CURSOR_SHOWING))
             return;
 
-        if (ci.hCursor == mLastCursor)
+        // 获取当前 DPI 和 目标尺寸
+        UINT currentDpi = GetCursorMonitorDPI();
+        int expectedTierSize = GetExpectedSystemCursorSize(currentDpi, 32); // 假设基础是32
+
+        // 注意：这里我们还需要简单判断一下是否是自定义光标来决定最终尺寸，
+        // 为了性能，我们可以先简单用 expectedTierSize 做指纹判断。
+        // 如果系统光标句柄没变，且预期档位没变，才算没变。
+
+        // 同时检查句柄 和 尺寸
+        if (ci.hCursor == mLastCursor && expectedTierSize == mLastSize)
         {
             return;
         }
@@ -933,6 +944,7 @@ public:
         if (!png.empty())
         {
             mLastCursor = ci.hCursor;
+            mLastSize = expectedTierSize; 
             if (frames > 1)
                 Logger::Get().Debug("发送动画 | Hash:", hash, " 尺寸:", finalSizeW, "x", finalSizeH, " 帧数:", frames);
             else
