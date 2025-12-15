@@ -23,6 +23,8 @@
 #include <windows.h>
 #include <objidl.h>
 
+#include <shellapi.h> 
+
 #include <gdiplus.h>
 #include <shellscalingapi.h>
 
@@ -52,6 +54,7 @@
 #pragma comment(lib, "shcore.lib")
 #pragma comment(lib, "ole32.lib")
 #pragma comment(lib, "advapi32.lib")
+#pragma comment(lib, "shell32.lib")
 
 // ==========================================
 //           1. 配置
@@ -201,6 +204,27 @@ struct ClientSession
     // 服务端通过查询这个集合，决定是发图片还是只发 ID
     std::unordered_set<uint32_t> cachedHashes;
 };
+
+// 辅助函数：重启自身
+void RestartApplication()
+{
+    char szPath[MAX_PATH];
+    if (GetModuleFileNameA(NULL, szPath, MAX_PATH))
+    {
+        Logger::Get().Info("检测到 DPI 缩放变化，正在重启应用以刷新资源...");
+
+        // 稍微等待一下，确保日志写入
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+        // 启动新实例
+        ShellExecuteA(NULL, "open", szPath, NULL, NULL, SW_SHOW);
+
+        // 退出当前实例
+        // 注意：这里直接 exit(0) 比较粗暴，会跳过析构函数。
+        // 如果你的析构里有非常重要的清理（比如保存文件），请手动调用。
+        exit(0);
+    }
+}
 
 class NetworkManager
 {
@@ -496,6 +520,13 @@ class CursorEngine
     int m_cachedHeight = 0; // 单帧高度
     int mLastSize = 0;      // 记录上一次处理的目标尺寸
 
+    // 记录上一帧的档位大小
+    int m_lastTierSize = -1;
+
+    // 防抖计时器：防止在两个屏幕交界处来回滑动鼠标导致疯狂重启
+    std::chrono::steady_clock::time_point m_dpiChangeStartTime;
+    bool m_isDpiChanging = false;
+
     static int GetEncoderClsid(const WCHAR *format, CLSID *pClsid)
     {
         UINT num, size;
@@ -701,6 +732,42 @@ public:
         UINT currentDpi = GetCursorMonitorDPI();
         // 计算当前 DPI 下，Windows 最可能加载的“标准档位尺寸”
         int expectedTierSize = GetExpectedSystemCursorSize(currentDpi, 32);
+
+        // 2. 初始化（第一次运行）
+        if (m_lastTierSize == -1)
+        {
+            m_lastTierSize = expectedTierSize;
+        }
+
+        // 3. 检测变化并重启
+        if (expectedTierSize != m_lastTierSize)
+        {
+            // 进入防抖逻辑
+            if (!m_isDpiChanging)
+            {
+                m_isDpiChanging = true;
+                m_dpiChangeStartTime = std::chrono::steady_clock::now();
+                Logger::Get().Debug("检测到 DPI 变化 (", m_lastTierSize, "->", expectedTierSize, ")，等待稳定...");
+            }
+            else
+            {
+                // 如果变化状态持续了超过 500ms (防止在边界抖动)
+                auto now = std::chrono::steady_clock::now();
+                if (std::chrono::duration_cast<std::chrono::milliseconds>(now - m_dpiChangeStartTime).count() > 500)
+                {
+                    // 确认变化稳定，执行重启！
+                    RestartApplication();
+                }
+            }
+            
+            // 在 DPI 变化期间，暂停处理光标，直接返回，避免发送错误大小的图像
+            return;
+        }
+        else
+        {
+            // 状态稳定或已恢复
+            m_isDpiChanging = false;
+        }
 
         // 注意：这里我们还需要简单判断一下是否是自定义光标来决定最终尺寸，
         // 为了性能，我们可以先简单用 expectedTierSize 做指纹判断。
