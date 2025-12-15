@@ -472,7 +472,6 @@ public:
 // user32.dll 未公开 API 定义
 typedef BOOL(WINAPI *GETCURSORFRAMEINFO)(HCURSOR, DWORD, DWORD, DWORD *, DWORD *);
 
-
 class CursorEngine
 {
     ULONG_PTR m_token;
@@ -701,7 +700,7 @@ public:
             return;
         }
 
-        // 获取注册表建议的大小 (系统光标缩放大小)
+        // 获取注册表的大小 (系统光标缩放大小)
         int regSize = GetTargetSize();
 
         // 获取动画帧数
@@ -742,13 +741,13 @@ public:
 
         // 获取当前屏幕 DPI
         UINT currentDpi = GetCursorMonitorDPI();
-        
+
         // 计算当前 DPI 下，Windows 最可能加载的“标准档位尺寸”
         int expectedTierSize = GetExpectedSystemCursorSize(currentDpi, 32);
 
         // 判断逻辑
         bool isSystemCursor = (orgW == 32 || orgW == regSize || orgW == expectedTierSize);
-        //高dpi下的注册表光标大小倍率
+        // 高dpi下的注册表光标大小倍率
         double scaleFactor = expectedTierSize / 32.0;
 
         // 格式：[DPI检测] DPI:144 | 档位:48 | 实际:48x48 -> SYSTEM (重置为32)
@@ -817,12 +816,18 @@ public:
             DrawIconEx(m_hMemDC, 0, drawY, ci.hCursor, finalSizeW, finalSizeH, i, NULL, DI_NORMAL);
         }
 
-        // 像素提取 (后续逻辑保持不变)
+        // =========================================================
+        //           像素提取与智能描边 (解决白底看不清问题)
+        // =========================================================
+
         uint32_t *pxB = (uint32_t *)m_pBitsB;
         uint32_t *pxW = (uint32_t *)m_pBitsW;
         int totalPixels = sheetW * sheetH;
-        std::vector<uint32_t> rawPixels(totalPixels);
 
+        std::vector<uint32_t> rawPixels(totalPixels, 0); // 初始化全透明
+        std::vector<uint8_t> xorMask(totalPixels, 0);    // 标记哪些点是反色核心
+
+        // --- 第一遍：提取颜色并标记反色区域 ---
         for (int i = 0; i < totalPixels; ++i)
         {
             uint32_t cB = pxB[i];
@@ -836,41 +841,62 @@ public:
             uint8_t wg = ((cW >> 8) & 0xFF);
             uint8_t wr = ((cW >> 16) & 0xFF);
 
-            // 处理 XOR 反色像素 (I-Beam 等)
+            // 判定是否为 XOR 反色像素 (黑底极亮，白底极暗)
             if (bg > 200 && wg < 50)
             {
-                uint8_t safeColor = 100;
-                rawPixels[i] = (255 << 24) | (safeColor << 16) | (safeColor << 8) | safeColor;
+                // 强制设为纯白 (核心颜色)
+                rawPixels[i] = 0xFFFFFFFF; // ARGB: 255, 255, 255, 255
+                xorMask[i] = 1;            // 标记这个点是核心
                 continue;
             }
 
-            // Alpha 提取
+            // 常规 Alpha 提取 (针对普通彩色光标)
             int dr = (int)wr - (int)br;
             int dg = (int)wg - (int)bg;
             int db = (int)wb - (int)bb;
-
             if (dr < 0)
                 dr = 0;
             if (dg < 0)
                 dg = 0;
             if (db < 0)
                 db = 0;
-
-            int maxDiff = dr;
-            if (dg > maxDiff)
-                maxDiff = dg;
-            if (db > maxDiff)
-                maxDiff = db;
-
+            int maxDiff = std::max({dr, dg, db});
             uint8_t alpha = (uint8_t)(255 - maxDiff);
 
             if (alpha > 5)
             {
                 rawPixels[i] = (alpha << 24) | (br << 16) | (bg << 8) | bb;
             }
-            else
+        }
+
+        // --- 第二遍：给白色核心加黑色描边 ---
+        // 只有这样才能在纯白背景下看清纯白光标
+        for (int y = 0; y < sheetH; ++y)
+        {
+            for (int x = 0; x < sheetW; ++x)
             {
-                rawPixels[i] = 0;
+                int idx = y * sheetW + x;
+
+                // 如果当前像素已经有颜色了（是核心或普通光标），跳过
+                if (rawPixels[idx] != 0)
+                    continue;
+
+                // 检查上下左右是否有 XOR 核心像素
+                bool isBorder = false;
+                if (x > 0 && xorMask[idx - 1])
+                    isBorder = true;
+                else if (x < sheetW - 1 && xorMask[idx + 1])
+                    isBorder = true;
+                else if (y > 0 && xorMask[idx - sheetW])
+                    isBorder = true;
+                else if (y < sheetH - 1 && xorMask[idx + sheetW])
+                    isBorder = true;
+
+                if (isBorder)
+                {
+                    // 绘制纯黑边框 (不透明)
+                    rawPixels[idx] = 0xFF000000; // ARGB: 255, 0, 0, 0
+                }
             }
         }
 
