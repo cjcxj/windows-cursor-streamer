@@ -606,6 +606,51 @@ class CursorEngine
         return std::clamp(s_size, 32, 256);
     }
 
+    // A. 获取光标当前所在显示器的 DPI
+    UINT GetCursorMonitorDPI()
+    {
+        POINT pt;
+        // 获取光标位置
+        if (GetCursorPos(&pt))
+        {
+            // 获取该点所在的显示器句柄
+            HMONITOR hMon = MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST);
+            if (hMon)
+            {
+                UINT dpiX, dpiY;
+                // 获取该显示器的有效 DPI
+                if (SUCCEEDED(GetDpiForMonitor(hMon, MDT_EFFECTIVE_DPI, &dpiX, &dpiY)))
+                {
+                    return dpiX;
+                }
+            }
+        }
+        return 96; // 默认 100%
+    }
+
+    // B. 根据 DPI 计算预期的系统光标档位 (32, 48, 64, 96)
+    int GetExpectedSystemCursorSize(int baseSize, UINT dpi)
+    {
+        // 1. 计算理论上的线性缩放大小
+        // 例如：base=32, dpi=144(150%) -> calculated = 48
+        // 例如：base=32, dpi=120(125%) -> calculated = 40
+        int calculated = MulDiv(baseSize, dpi, 96);
+
+        // 2. 向下取整/阶梯匹配逻辑 (模拟 Windows 资源加载策略)
+        // 即使 DPI 很高，如果计算出来是 42，Windows 可能还是用的 32 的资源
+        // 只有达到了 48 的阈值，才会切到 48 的资源
+
+        if (calculated >= 96)
+            return 96;
+        if (calculated >= 64)
+            return 64;
+        if (calculated >= 48)
+            return 48;
+
+        // 默认档位
+        return 32;
+    }
+
     std::pair<int, int> GetAnimInfo(HCURSOR h)
     {
         if (!m_pGetCursorFrameInfo)
@@ -647,7 +692,7 @@ public:
         mLastCursor = NULL;
     }
 
-void CaptureAndSend()
+    void CaptureAndSend()
     {
         // --- 优化 1: 频率限制 (Debounce) ---
         // 强制两次处理之间至少间隔 30ms (约 33 FPS)
@@ -674,18 +719,18 @@ void CaptureAndSend()
 
         // 1. 获取注册表建议的大小 (系统缩放大小)
         int regSize = GetTargetSize();
-        
+
         // 2. 获取动画帧数
         auto [frames, delay] = GetAnimInfo(ci.hCursor);
 
         // 3. 获取光标原始物理尺寸 (用于判断是否为自定义光标)
         ICONINFO ii = {0};
         GetIconInfo(ci.hCursor, &ii);
-        
+
         int orgW = 32; // 默认为 32
         int orgH = 32;
         BITMAP bmp;
-        
+
         // 尝试获取 Color 位图信息
         if (ii.hbmColor && GetObject(ii.hbmColor, sizeof(bmp), &bmp))
         {
@@ -698,26 +743,45 @@ void CaptureAndSend()
             orgW = bmp.bmWidth;
             orgH = bmp.bmHeight / 2; // Mask 高度通常是双倍的
         }
-        
+
         // 这里的 hbmColor 和 hbmMask 用完需要释放，防止内存泄漏
-        if (ii.hbmColor) DeleteObject(ii.hbmColor);
-        if (ii.hbmMask) DeleteObject(ii.hbmMask);
+        if (ii.hbmColor)
+            DeleteObject(ii.hbmColor);
+        if (ii.hbmMask)
+            DeleteObject(ii.hbmMask);
 
         // =========================================================
-        //           核心逻辑修改：判断使用系统大小还是原始大小
+        //           核心逻辑修改：基于 DPI 阶梯的系统光标判断
         // =========================================================
         int finalSizeW = 0;
         int finalSizeH = 0;
 
-        // 逻辑：如果获取的大小等于32 或者 等于注册表大小 -> 视为系统光标，使用注册表大小捕获 (支持 DPI 缩放)
-        if (orgW == 32 || orgW == regSize)
+        // 1. 获取当前屏幕 DPI
+        UINT currentDpi = GetCursorMonitorDPI();
+
+        // 2. 计算当前 DPI 下，Windows 最可能加载的“标准档位尺寸”
+        // 传入 regSize 作为基准 (通常是 32)
+        int expectedTierSize = GetExpectedSystemCursorSize(regSize, currentDpi);
+
+        // 3. 判断逻辑
+        // 如果 orgW 等于 32 (最基础尺寸)
+        // 或者 orgW 等于 regSize (用户设定的基础尺寸)
+        // 或者 orgW 等于 当前DPI应该加载的档位尺寸 (例如 150% 下的 48)
+        bool isSystemCursor = (orgW == 32 || orgW == regSize || orgW == expectedTierSize);
+
+        if (isSystemCursor)
         {
+            // 判定为系统光标：
+            // 无论当前物理抓取到的是 48 还是 64，都统一缩放回 regSize (通常是 32)
+            // 这样客户端在 100% 缩放的电脑上看着才正常
             finalSizeW = regSize;
-            finalSizeH = regSize;  
+            finalSizeH = regSize;
         }
         else
         {
-            // 反之 -> 视为自定义光标 (如游戏光标)，使用获取的大小捕获 (保持原始像素清晰度)
+            // 判定为自定义光标：
+            // 例如游戏里的特殊光标，或者非标准尺寸的光标 (如 40, 50, 128 等)
+            // 保持原始物理分辨率，确保高清不模糊
             finalSizeW = orgW;
             finalSizeH = orgH;
         }
@@ -726,13 +790,15 @@ void CaptureAndSend()
         // 4. 根据最终决定的 finalSize 计算热点 (保持比例)
         float scaleRatioW = (float)finalSizeW / (float)orgW;
         float scaleRatioH = (float)finalSizeH / (float)orgH;
-        
+
         int hotX = (int)(ii.xHotspot * scaleRatioW);
         int hotY = (int)(ii.yHotspot * scaleRatioH);
-        
+
         // 边界钳制
-        if (hotX >= finalSizeW) hotX = finalSizeW - 1;
-        if (hotY >= finalSizeH) hotY = finalSizeH - 1;
+        if (hotX >= finalSizeW)
+            hotX = finalSizeW - 1;
+        if (hotY >= finalSizeH)
+            hotY = finalSizeH - 1;
 
         // 5. 准备绘图尺寸
         int sheetW = finalSizeW;
@@ -754,11 +820,11 @@ void CaptureAndSend()
         for (int i = 0; i < frames; ++i)
         {
             int drawY = i * finalSizeH;
-            
+
             // DrawIconEx 会自动根据 destWidth/destHeight (finalSize) 进行缩放
             SelectObject(m_hMemDC, m_hBmpB);
             DrawIconEx(m_hMemDC, 0, drawY, ci.hCursor, finalSizeW, finalSizeH, i, NULL, DI_NORMAL);
-            
+
             SelectObject(m_hMemDC, m_hBmpW);
             DrawIconEx(m_hMemDC, 0, drawY, ci.hCursor, finalSizeW, finalSizeH, i, NULL, DI_NORMAL);
         }
@@ -795,13 +861,18 @@ void CaptureAndSend()
             int dg = (int)wg - (int)bg;
             int db = (int)wb - (int)bb;
 
-            if (dr < 0) dr = 0;
-            if (dg < 0) dg = 0;
-            if (db < 0) db = 0;
+            if (dr < 0)
+                dr = 0;
+            if (dg < 0)
+                dg = 0;
+            if (db < 0)
+                db = 0;
 
             int maxDiff = dr;
-            if (dg > maxDiff) maxDiff = dg;
-            if (db > maxDiff) maxDiff = db;
+            if (dg > maxDiff)
+                maxDiff = dg;
+            if (db > maxDiff)
+                maxDiff = db;
 
             uint8_t alpha = (uint8_t)(255 - maxDiff);
 
