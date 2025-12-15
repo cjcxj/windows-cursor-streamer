@@ -758,6 +758,7 @@ public:
 
         // 1. 获取当前屏幕 DPI
         UINT currentDpi = GetCursorMonitorDPI();
+        
 
         // 2. 计算当前 DPI 下，Windows 最可能加载的“标准档位尺寸”
         // 传入 regSize 作为基准 (通常是 32)
@@ -768,6 +769,15 @@ public:
         // 或者 orgW 等于 regSize (用户设定的基础尺寸)
         // 或者 orgW 等于 当前DPI应该加载的档位尺寸 (例如 150% 下的 48)
         bool isSystemCursor = (orgW == 32 || orgW == regSize || orgW == expectedTierSize);
+
+        // 3. [DEBUG LOG] 打印决策过程
+        // 格式：[DPI检测] DPI:144 | 档位:48 | 实际:48x48 -> SYSTEM (重置为32)
+        Logger::Get().Debug(
+            "[DPI检测]",
+            "DPI:", currentDpi,
+            "| 预测档位:", expectedTierSize,
+            "| 实际尺寸:", orgW, "x", orgH,
+            "->", isSystemCursor ? "SYSTEM (缩放)" : "CUSTOM (保持)");
 
         if (isSystemCursor)
         {
