@@ -19,7 +19,6 @@ target_link_libraries(CursorMonitor PRIVATE
     shcore      # DPI Awareness
     ole32       # COM (IStream 用于内存流)
     advapi32    # Registry
-    shell32     # Shell API
 )
 
 # 嵌入 Manifest

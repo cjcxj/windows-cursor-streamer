@@ -23,8 +23,6 @@
 #include <windows.h>
 #include <objidl.h>
 
-#include <shellapi.h> 
-
 #include <gdiplus.h>
 #include <shellscalingapi.h>
 
@@ -209,20 +207,30 @@ struct ClientSession
 void RestartApplication()
 {
     char szPath[MAX_PATH];
+    // 获取当前 exe 路径
     if (GetModuleFileNameA(NULL, szPath, MAX_PATH))
     {
         Logger::Get().Info("检测到 DPI 缩放变化，正在重启应用以刷新资源...");
-
-        // 稍微等待一下，确保日志写入
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
 
-        // 启动新实例
-        ShellExecuteA(NULL, "open", szPath, NULL, NULL, SW_SHOW);
+        STARTUPINFOA si = { sizeof(si) };
+        PROCESS_INFORMATION pi = { 0 };
 
-        // 退出当前实例
-        // 注意：这里直接 exit(0) 比较粗暴，会跳过析构函数。
-        // 如果你的析构里有非常重要的清理（比如保存文件），请手动调用。
-        exit(0);
+        // 直接把当前进程的完整命令行（路径+参数）传给新进程
+        if (CreateProcessA(
+            szPath,              // Exe 路径
+            GetCommandLineA(),   // 命令行参数 (包含 -l DEBUG 等)
+            NULL, NULL, FALSE, 0, NULL, NULL, 
+            &si, &pi
+        ))
+        {
+            // 释放句柄
+            CloseHandle(pi.hProcess);
+            CloseHandle(pi.hThread);
+            
+            // 退出当前进程
+            exit(0);
+        }
     }
 }
 
