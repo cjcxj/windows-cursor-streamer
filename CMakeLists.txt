@@ -18,7 +18,16 @@ target_link_libraries(CursorMonitor PRIVATE
     gdiplus     # GDI+ (PNG 编码)
     shcore      # DPI Awareness
     ole32       # COM (IStream 用于内存流)
+    advapi32    # Registry
 )
+
+# 嵌入 Manifest
+if(MSVC)
+    target_link_options(CursorMonitor PRIVATE 
+        "/MANIFEST:EMBED"
+        "/MANIFESTINPUT:${CMAKE_CURRENT_SOURCE_DIR}/cursor_monitor.manifest"
+    )
+endif()
 
 # 针对 Windows 子系统设置 (如果你不想看到控制台黑框，改为 WIN32)
 # 这里保留 CONSOLE 以便查看日志
