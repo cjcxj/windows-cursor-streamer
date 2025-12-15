@@ -717,7 +717,7 @@ public:
             return;
         }
 
-        // 1. 获取注册表建议的大小 (系统缩放大小)
+        // 1. 获取注册表建议的大小 (系统光标缩放大小)
         int regSize = GetTargetSize();
 
         // 2. 获取动画帧数
@@ -761,14 +761,15 @@ public:
         
 
         // 2. 计算当前 DPI 下，Windows 最可能加载的“标准档位尺寸”
-        // 传入 regSize 作为基准 (通常是 32)
-        int expectedTierSize = GetExpectedSystemCursorSize(regSize, currentDpi);
+        int expectedTierSize = GetExpectedSystemCursorSize(currentDpi, 96);
 
         // 3. 判断逻辑
         // 如果 orgW 等于 32 (最基础尺寸)
         // 或者 orgW 等于 regSize (用户设定的基础尺寸)
         // 或者 orgW 等于 当前DPI应该加载的档位尺寸 (例如 150% 下的 48)
         bool isSystemCursor = (orgW == 32 || orgW == regSize || orgW == expectedTierSize);
+        //高dpi下的注册表光标大小倍率
+        double scaleFactor = expectedTierSize / 32.0;
 
         // 3. [DEBUG LOG] 打印决策过程
         // 格式：[DPI检测] DPI:144 | 档位:48 | 实际:48x48 -> SYSTEM (重置为32)
@@ -784,8 +785,8 @@ public:
             // 判定为系统光标：
             // 无论当前物理抓取到的是 48 还是 64，都统一缩放回 regSize (通常是 32)
             // 这样客户端在 100% 缩放的电脑上看着才正常
-            finalSizeW = regSize;
-            finalSizeH = regSize;
+            finalSizeW = int(regSize * scaleFactor);
+            finalSizeH = int(regSize * scaleFactor);
         }
         else
         {
