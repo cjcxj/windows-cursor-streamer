@@ -472,13 +472,6 @@ public:
 // user32.dll 未公开 API 定义
 typedef BOOL(WINAPI *GETCURSORFRAMEINFO)(HCURSOR, DWORD, DWORD, DWORD *, DWORD *);
 
-// ==========================================
-//           4. 光标引擎 (高性能优化版)
-// ==========================================
-// 优化点：
-// 1. 资源复用：不再每帧创建/销毁 GDI 对象
-// 2. 严格去重：句柄不变时，完全不执行任何逻辑
-// 3. 频率限制：强制最小间隔，防止高频抖动
 
 class CursorEngine
 {
@@ -606,7 +599,7 @@ class CursorEngine
         return std::clamp(s_size, 32, 256);
     }
 
-    // A. 获取光标当前所在显示器的 DPI
+    // 获取光标当前所在显示器的 DPI
     UINT GetCursorMonitorDPI()
     {
         POINT pt;
@@ -628,12 +621,10 @@ class CursorEngine
         return 96; // 默认 100%
     }
 
-    // B. 根据 DPI 计算预期的系统光标档位 (32, 48, 64, 96)
+    // 根据 DPI 计算预期的系统光标档位 (32, 48, 64, 96)
     int GetExpectedSystemCursorSize(int baseSize, UINT dpi)
     {
         // 1. 计算理论上的线性缩放大小
-        // 例如：base=32, dpi=144(150%) -> calculated = 48
-        // 例如：base=32, dpi=120(125%) -> calculated = 40
         int calculated = MulDiv(baseSize, dpi, 96);
 
         // 2. 向下取整/阶梯匹配逻辑 (模拟 Windows 资源加载策略)
@@ -694,9 +685,6 @@ public:
 
     void CaptureAndSend()
     {
-        // --- 优化 1: 频率限制 (Debounce) ---
-        // 强制两次处理之间至少间隔 30ms (约 33 FPS)
-        // 即使鼠标移动极快，我们也不需要处理得比屏幕刷新率还快
         auto now = std::chrono::steady_clock::now();
         if (std::chrono::duration_cast<std::chrono::milliseconds>(now - mLastProcessTime).count() < 30)
         {
@@ -708,22 +696,18 @@ public:
         if (!GetCursorInfo(&ci) || !(ci.flags & CURSOR_SHOWING))
             return;
 
-        // --- 优化 2: 严格句柄去重 ---
-        // 如果句柄没变，直接返回，什么都不做。
-        // 因为我们使用的是 Sprite Sheet 协议，动画也是一次性发完的。
-        // 只要句柄不变，客户端就已经有了正确的动画在播放，无需任何网络通信。
         if (ci.hCursor == mLastCursor)
         {
             return;
         }
 
-        // 1. 获取注册表建议的大小 (系统光标缩放大小)
+        // 获取注册表建议的大小 (系统光标缩放大小)
         int regSize = GetTargetSize();
 
-        // 2. 获取动画帧数
+        // 获取动画帧数
         auto [frames, delay] = GetAnimInfo(ci.hCursor);
 
-        // 3. 获取光标原始物理尺寸 (用于判断是否为自定义光标)
+        // 获取光标原始物理尺寸
         ICONINFO ii = {0};
         GetIconInfo(ci.hCursor, &ii);
 
@@ -756,22 +740,17 @@ public:
         int finalSizeW = 0;
         int finalSizeH = 0;
 
-        // 1. 获取当前屏幕 DPI
+        // 获取当前屏幕 DPI
         UINT currentDpi = GetCursorMonitorDPI();
         
+        // 计算当前 DPI 下，Windows 最可能加载的“标准档位尺寸”
+        int expectedTierSize = GetExpectedSystemCursorSize(currentDpi, 32);
 
-        // 2. 计算当前 DPI 下，Windows 最可能加载的“标准档位尺寸”
-        int expectedTierSize = GetExpectedSystemCursorSize(currentDpi, 96);
-
-        // 3. 判断逻辑
-        // 如果 orgW 等于 32 (最基础尺寸)
-        // 或者 orgW 等于 regSize (用户设定的基础尺寸)
-        // 或者 orgW 等于 当前DPI应该加载的档位尺寸 (例如 150% 下的 48)
+        // 判断逻辑
         bool isSystemCursor = (orgW == 32 || orgW == regSize || orgW == expectedTierSize);
         //高dpi下的注册表光标大小倍率
         double scaleFactor = expectedTierSize / 32.0;
 
-        // 3. [DEBUG LOG] 打印决策过程
         // 格式：[DPI检测] DPI:144 | 档位:48 | 实际:48x48 -> SYSTEM (重置为32)
         Logger::Get().Debug(
             "[DPI检测]",
@@ -783,7 +762,6 @@ public:
         if (isSystemCursor)
         {
             // 判定为系统光标：
-            // 无论当前物理抓取到的是 48 还是 64，都统一缩放回 regSize (通常是 32)
             // 这样客户端在 100% 缩放的电脑上看着才正常
             finalSizeW = int(regSize * scaleFactor);
             finalSizeH = int(regSize * scaleFactor);
@@ -798,7 +776,7 @@ public:
         }
         // =========================================================
 
-        // 4. 根据最终决定的 finalSize 计算热点 (保持比例)
+        // 根据最终决定的 finalSize 计算热点 (保持比例)
         float scaleRatioW = (float)finalSizeW / (float)orgW;
         float scaleRatioH = (float)finalSizeH / (float)orgH;
 
@@ -811,11 +789,10 @@ public:
         if (hotY >= finalSizeH)
             hotY = finalSizeH - 1;
 
-        // 5. 准备绘图尺寸
+        // 准备绘图尺寸
         int sheetW = finalSizeW;
         int sheetH = finalSizeH * frames;
 
-        // --- 优化 3: 资源复用 ---
         if (!RecreateResources(sheetW, sheetH))
             return;
 
