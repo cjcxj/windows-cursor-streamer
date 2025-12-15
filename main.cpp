@@ -625,7 +625,7 @@ class CursorEngine
         static auto s_lastCheck = std::chrono::steady_clock::now();
         auto now = std::chrono::steady_clock::now();
 
-        if (std::chrono::duration_cast<std::chrono::seconds>(now - s_lastCheck).count() > 5)
+        if (std::chrono::duration_cast<std::chrono::seconds>(now - s_lastCheck).count() > 2)
         {
             s_lastCheck = now;
             HKEY k;
@@ -649,11 +649,11 @@ class CursorEngine
         {
             HMONITOR hMon = MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST);
             auto now = std::chrono::steady_clock::now();
-            
+
             // 判断缓存是否失效：
             // 1. 显示器句柄变了 (跨屏)
             // 2. 或者，距离上次检查已经过了 2 秒 (定期刷新以检测同一屏幕的 DPI 变更)
-            bool isCacheStale = (hMon != mLastMonitor) || 
+            bool isCacheStale = (hMon != mLastMonitor) ||
                                 (std::chrono::duration_cast<std::chrono::seconds>(now - mLastDpiCheckTime).count() >= 2);
 
             if (isCacheStale)
@@ -662,7 +662,8 @@ class CursorEngine
                 if (SUCCEEDED(GetDpiForMonitor(hMon, MDT_EFFECTIVE_DPI, &dpiX, &dpiY)))
                 {
                     // 只有当数值真的变了，或者显示器变了才记录，方便调试
-                    if (dpiX != mLastDpi || hMon != mLastMonitor) {
+                    if (dpiX != mLastDpi || hMon != mLastMonitor)
+                    {
                         Logger::Get().Debug("DPI/显示器状态更新: ", dpiX);
                     }
 
@@ -756,7 +757,7 @@ public:
             return;
 
         // 2. DPI 检查 (使用优化后的带缓存版本)
-        UINT currentDpi = GetCursorMonitorDPI(); // 获取当前光标所在显示器的 DPI
+        UINT currentDpi = GetCursorMonitorDPI();                            // 获取当前光标所在显示器的 DPI
         int expectedTierSize = GetExpectedSystemCursorSize(currentDpi, 32); // 光标预期档位
 
         // 初始化
@@ -826,6 +827,14 @@ public:
         int finalSizeW = orgW;
         int finalSizeH = orgH;
         bool isSystemCursor = (orgW == 32 || orgW == regSize || orgW == expectedTierSize);
+
+        // 格式：[DPI检测] DPI:144 | 档位:48 | 实际:48x48 -> SYSTEM (重置为32)
+        Logger::Get().Debug(
+            "[DPI检测]",
+            "DPI:", currentDpi,
+            "| 预测档位:", expectedTierSize,
+            "| 实际尺寸:", orgW, "x", orgH,
+            "->", isSystemCursor ? "SYSTEM (缩放)" : "CUSTOM (保持)");
 
         if (isSystemCursor)
         {
