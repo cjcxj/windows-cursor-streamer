@@ -719,7 +719,7 @@ class CursorEngine
     }
 
     // 根据 DPI 计算预期的系统光标档位
-    int GetExpectedSystemCursorSize(int baseSize, UINT dpi)
+    int GetExpectedSystemCursorSize(UINT dpi, int baseSize)
     {
         int calculated = MulDiv(baseSize, dpi, 96);
         if (calculated >= 96)
@@ -800,7 +800,7 @@ public:
 
         // 2. DPI 检查 (使用优化后的带缓存版本)
         UINT currentDpi = GetCursorMonitorDPI();                            // 获取当前光标所在显示器的 DPI
-        int expectedTierSize = GetExpectedSystemCursorSize(currentDpi, 32); // 光标预期档位
+        int expectedTierSize = GetExpectedSystemCursorSize(currentDpi, 32); // 光标预期档位 (修正参数顺序)
 
         // 初始化
         if (mLastTierSize == -1)
@@ -843,6 +843,15 @@ public:
         if (!GetIconInfo(ci.hCursor, &ii))
             return; // 失败保护
 
+        // RAII 资源管理 - 确保无论如何都会释放
+        struct IconInfoGuard {
+            ICONINFO& info;
+            ~IconInfoGuard() {
+                if (info.hbmColor) DeleteObject(info.hbmColor);
+                if (info.hbmMask) DeleteObject(info.hbmMask);
+            }
+        } guard{ii};
+
         int orgW = 32, orgH = 32;
         BITMAP bmp;
         bool hasColor = false;
@@ -858,12 +867,6 @@ public:
             orgW = bmp.bmWidth;
             orgH = bmp.bmHeight / 2;
         }
-
-        // 资源清理 RAII 替代
-        if (ii.hbmColor)
-            DeleteObject(ii.hbmColor);
-        if (ii.hbmMask)
-            DeleteObject(ii.hbmMask);
 
         // 计算最终尺寸
         int finalSizeW = orgW;
@@ -1079,10 +1082,10 @@ public:
 
 NetworkManager g_net;
 std::unique_ptr<CursorEngine> g_engine;
-bool g_exit = false;
+std::atomic<bool> g_exit{false};
 
 HHOOK g_hMouseHook = NULL;
-int g_lastSentState = -2; // 记录上一次发送的状态 (-2为初始值)
+std::atomic<int> g_lastSentState{-2}; // 记录上一次发送的状态 (-2为初始值)
 
 void UpdateTextCursorState(int clickX, int clickY) {
     int currentState = -1; // 默认 -1 表示未处于文本输入状态
@@ -1095,6 +1098,8 @@ void UpdateTextCursorState(int clickX, int clickY) {
     if (GetMonitorInfo(hMon, &mi)) {
         // 计算相对于当前显示器的局部坐标和总高度
         int monitorHeight = mi.rcMonitor.bottom - mi.rcMonitor.top;
+        if (monitorHeight <= 0) return; // 防御性检查
+        
         int relativeY = clickY - mi.rcMonitor.top;
         
         // 转换为 0 ~ 10000 的万分比整数 (例如: 8533 代表 85.33%)
@@ -1103,12 +1108,13 @@ void UpdateTextCursorState(int clickX, int clickY) {
     }
 
     // 状态防抖: 只有状态改变(从 -1 变为有值，或百分比变化大于 1%) 时才发包
+    int lastState = g_lastSentState.load();
     bool stateChanged = false;
-    if (currentState == -1 && g_lastSentState != -1) {
+    if (currentState == -1 && lastState != -1) {
         stateChanged = true; // 退出了输入状态
     } else if (currentState != -1) {
         // 如果高度变化超过 100 (即 1%)，认为切换了输入框
-        if (std::abs(currentState - g_lastSentState) > 100) {
+        if (std::abs(currentState - lastState) > 100) {
             stateChanged = true;
         }
     }
@@ -1120,12 +1126,14 @@ void UpdateTextCursorState(int clickX, int clickY) {
             Logger::Get().Info("[状态检测] 鼠标点击位置，相对屏幕 Y 轴高度:", currentState / 100.0f, "%");
         }
         
-        // 异步发送给客户端
-        std::thread([currentState]() { 
-            g_net.BroadcastTextCursorState(currentState); 
+        // 安全的异步发送 (检查退出标志)
+        std::thread([currentState]() {
+            if (!g_exit.load()) {
+                g_net.BroadcastTextCursorState(currentState);
+            }
         }).detach();
         
-        g_lastSentState = currentState;
+        g_lastSentState.store(currentState);
     }
 }
 
@@ -1245,21 +1253,31 @@ int main(int argc, char *argv[])
 
     // 消息循环 (必须保留以响应钩子)
     MSG msg;
-    while (GetMessage(&msg, NULL, 0, 0))
+    while (!g_exit.load() && GetMessage(&msg, NULL, 0, 0))
     {
         TranslateMessage(&msg);
         DispatchMessage(&msg);
     }
 
     // 退出清理
-    g_exit = true;
+    Logger::Get().Info("正在关闭程序...");
+    g_exit.store(true);
     g_cvCursorChanged.notify_all();
-    g_net.Shutdown();
-    t1.join();
-    t2.join();
     
+    // 先卸载钩子，停止新的事件
     if (hHook) UnhookWinEvent(hHook);
     if (g_hMouseHook) UnhookWindowsHookEx(g_hMouseHook);
     
+    // 等待工作线程结束
+    if (t1.joinable()) t1.join();
+    if (t2.joinable()) t2.join();
+    
+    // 销毁引擎 (在网络关闭前)
+    g_engine.reset();
+    
+    // 最后关闭网络
+    g_net.Shutdown();
+    
+    Logger::Get().Info("程序已安全退出");
     return 0;
 }
