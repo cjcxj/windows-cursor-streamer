@@ -1082,27 +1082,24 @@ std::unique_ptr<CursorEngine> g_engine;
 bool g_exit = false;
 
 HHOOK g_hMouseHook = NULL;
-HCURSOR g_hIBeam = NULL; 
 int g_lastSentState = -2; // 记录上一次发送的状态 (-2为初始值)
 
-void UpdateTextCursorState(bool isTextCursor, int clickX, int clickY) {
+void UpdateTextCursorState(int clickX, int clickY) {
     int currentState = -1; // 默认 -1 表示未处于文本输入状态
 
-    if (isTextCursor) {
-        // 获取点击位置所在的显示器 (完美兼容多屏)
-        POINT pt = { clickX, clickY };
-        HMONITOR hMon = MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST);
-        MONITORINFO mi = { sizeof(MONITORINFO) };
+    // 获取点击位置所在的显示器 (完美兼容多屏)
+    POINT pt = { clickX, clickY };
+    HMONITOR hMon = MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST);
+    MONITORINFO mi = { sizeof(MONITORINFO) };
+    
+    if (GetMonitorInfo(hMon, &mi)) {
+        // 计算相对于当前显示器的局部坐标和总高度
+        int monitorHeight = mi.rcMonitor.bottom - mi.rcMonitor.top;
+        int relativeY = clickY - mi.rcMonitor.top;
         
-        if (GetMonitorInfo(hMon, &mi)) {
-            // 计算相对于当前显示器的局部坐标和总高度
-            int monitorHeight = mi.rcMonitor.bottom - mi.rcMonitor.top;
-            int relativeY = clickY - mi.rcMonitor.top;
-            
-            // 转换为 0 ~ 10000 的万分比整数 (例如: 8533 代表 85.33%)
-            currentState = (int)((relativeY * 10000.0f) / monitorHeight);
-            currentState = std::clamp(currentState, 0, 10000);
-        }
+        // 转换为 0 ~ 10000 的万分比整数 (例如: 8533 代表 85.33%)
+        currentState = (int)((relativeY * 10000.0f) / monitorHeight);
+        currentState = std::clamp(currentState, 0, 10000);
     }
 
     // 状态防抖: 只有状态改变(从 -1 变为有值，或百分比变化大于 1%) 时才发包
@@ -1120,7 +1117,7 @@ void UpdateTextCursorState(bool isTextCursor, int clickX, int clickY) {
         if (currentState == -1) {
             Logger::Get().Info("[状态检测] 退出文本输入状态");
         } else {
-            Logger::Get().Info("[状态检测] 文本框被点击，相对屏幕 Y 轴高度:", currentState / 100.0f, "%");
+            Logger::Get().Info("[状态检测] 鼠标点击位置，相对屏幕 Y 轴高度:", currentState / 100.0f, "%");
         }
         
         // 异步发送给客户端
@@ -1137,18 +1134,14 @@ LRESULT CALLBACK MouseProc(int nCode, WPARAM wParam, LPARAM lParam) {
     if (nCode == HC_ACTION) {
         if (wParam == WM_LBUTTONUP) {
             MSLLHOOKSTRUCT* pMouseStruct = (MSLLHOOKSTRUCT*)lParam;
-
-            CURSORINFO ci = { 0 };
-            ci.cbSize = sizeof(CURSORINFO);
-
-            if (GetCursorInfo(&ci)) {
-                bool isTextCursor = (ci.flags == CURSOR_SHOWING && ci.hCursor == g_hIBeam);
-                UpdateTextCursorState(isTextCursor, pMouseStruct->pt.x, pMouseStruct->pt.y);
-            }
+            // 直接使用点击坐标，不再检查光标类型
+            UpdateTextCursorState(pMouseStruct->pt.x, pMouseStruct->pt.y);
         }
     }
     return CallNextHookEx(g_hMouseHook, nCode, wParam, lParam);
 }
+
+
 
 // Windows 事件钩子：当光标改变时触发
 void CALLBACK HookProc(HWINEVENTHOOK, DWORD, HWND, LONG id, LONG, DWORD, DWORD)
@@ -1239,18 +1232,15 @@ int main(int argc, char *argv[])
     std::thread t2([&]
                    { g_net.AcceptLoop(); });
 
-    // 初始化 I-Beam 句柄
-    g_hIBeam = LoadCursor(NULL, IDC_IBEAM);
-
     // 安装钩子 (图像变化钩子)
     HWINEVENTHOOK hHook = SetWinEventHook(EVENT_OBJECT_NAMECHANGE, EVENT_OBJECT_NAMECHANGE, NULL, HookProc, 0, 0, WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS);
 
-    // 安装全局低级鼠标钩子 (文本光标检测钩子)
+    // 安装全局低级鼠标钩子 (点击位置检测)
     g_hMouseHook = SetWindowsHookEx(WH_MOUSE_LL, MouseProc, NULL, 0);
     if (!g_hMouseHook) {
-        Logger::Get().Error("鼠标钩子安装失败，防遮挡功能可能无法工作!");
+        Logger::Get().Error("鼠标钩子安装失败!");
     } else {
-        Logger::Get().Info("全局鼠标点击监听已开启 (文本光标高度检测)");
+        Logger::Get().Info("全局鼠标点击监听已开启");
     }
 
     // 消息循环 (必须保留以响应钩子)
@@ -1269,7 +1259,7 @@ int main(int argc, char *argv[])
     t2.join();
     
     if (hHook) UnhookWinEvent(hHook);
-    if (g_hMouseHook) UnhookWindowsHookEx(g_hMouseHook); // 卸载鼠标钩子
+    if (g_hMouseHook) UnhookWindowsHookEx(g_hMouseHook);
     
     return 0;
 }
