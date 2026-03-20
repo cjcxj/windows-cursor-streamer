@@ -1131,12 +1131,23 @@ bool GetCaretScreenPosition(int& outX, int& outY) {
 }
 
 void UpdateTextCursorState(bool forceUpdate = false) {
+    static int lastCaretX = -1;
+    static int lastCaretY = -1;
+    
     int currentState = -1;
     int caretX = 0, caretY = 0;
 
     // 直接尝试获取插入符位置（不依赖光标句柄判断）
     // 如果成功获取到插入符，说明当前处于文本输入状态
     if (GetCaretScreenPosition(caretX, caretY)) {
+        // 检查光标位置是否真正变化（避免鼠标移动时的无效更新）
+        if (!forceUpdate && caretX == lastCaretX && caretY == lastCaretY) {
+            return; // 位置未变化，直接返回
+        }
+        
+        lastCaretX = caretX;
+        lastCaretY = caretY;
+        
         POINT pt = { caretX, caretY };
         HMONITOR hMon = MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST);
         MONITORINFO mi = { sizeof(MONITORINFO) };
@@ -1151,6 +1162,9 @@ void UpdateTextCursorState(bool forceUpdate = false) {
         
         g_textCursorActive = true;
     } else {
+        // 光标不可见时，重置缓存
+        lastCaretX = -1;
+        lastCaretY = -1;
         g_textCursorActive = false;
     }
 
