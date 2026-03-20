@@ -800,7 +800,7 @@ public:
 
         // 2. DPI 检查 (使用优化后的带缓存版本)
         UINT currentDpi = GetCursorMonitorDPI();                            // 获取当前光标所在显示器的 DPI
-        int expectedTierSize = GetExpectedSystemCursorSize(currentDpi, 32); // 光标预期档位
+        int expectedTierSize = GetExpectedSystemCursorSize(32, currentDpi); // 光标预期档位 (修复参数顺序)
 
         // 初始化
         if (mLastTierSize == -1)
@@ -1042,7 +1042,12 @@ public:
             gdiBmp.UnlockBits(&bd);
 
             IStream *s = NULL;
-            CreateStreamOnHGlobal(NULL, TRUE, &s);
+            if (FAILED(CreateStreamOnHGlobal(NULL, TRUE, &s)) || !s)
+            {
+                Logger::Get().Error("创建 PNG 流失败");
+                return;
+            }
+            
             CLSID pngId;
             GetEncoderClsid(L"image/png", &pngId);
             gdiBmp.Save(s, &pngId, NULL);
@@ -1082,72 +1087,131 @@ std::unique_ptr<CursorEngine> g_engine;
 bool g_exit = false;
 
 HHOOK g_hMouseHook = NULL;
-HCURSOR g_hIBeam = NULL; 
-int g_lastSentState = -2; // 记录上一次发送的状态 (-2为初始值)
+HHOOK g_hKeyboardHook = NULL;
+std::atomic<int> g_lastSentState{-2}; // 记录上一次发送的状态 (原子变量保证线程安全)
+std::atomic<bool> g_textCursorActive{false}; // 标记是否处于文本输入状态
 
-void UpdateTextCursorState(bool isTextCursor, int clickX, int clickY) {
-    int currentState = -1; // 默认 -1 表示未处于文本输入状态
+// 实时获取系统插入符 (Caret) 的屏幕坐标
+bool GetCaretScreenPosition(int& outX, int& outY) {
+    GUITHREADINFO gti = { sizeof(GUITHREADINFO) };
+    
+    // 方法1: 获取前台线程的 GUI 信息 (标准 Win32 控件)
+    if (GetGUIThreadInfo(0, &gti)) {
+        if (gti.hwndCaret && gti.rcCaret.left >= 0) {
+            POINT caretPos = {gti.rcCaret.left, gti.rcCaret.top};
+            
+            // 转换为屏幕坐标
+            if (ClientToScreen(gti.hwndCaret, &caretPos)) {
+                outX = caretPos.x;
+                outY = caretPos.y;
+                return true;
+            }
+        }
+        
+        // 方法2: 如果没有 Caret，但有焦点窗口，尝试获取其位置
+        // (适用于自绘光标的应用，如 Chrome/Electron)
+        if (gti.hwndFocus) {
+            RECT focusRect;
+            if (GetWindowRect(gti.hwndFocus, &focusRect)) {
+                // 获取当前鼠标位置作为近似值
+                POINT mousePos;
+                if (GetCursorPos(&mousePos)) {
+                    // 检查鼠标是否在焦点窗口内
+                    if (PtInRect(&focusRect, mousePos)) {
+                        outX = mousePos.x;
+                        outY = mousePos.y;
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+    
+    return false;
+}
 
-    if (isTextCursor) {
-        // 获取点击位置所在的显示器 (完美兼容多屏)
-        POINT pt = { clickX, clickY };
+void UpdateTextCursorState(bool forceUpdate = false) {
+    int currentState = -1;
+    int caretX = 0, caretY = 0;
+
+    // 直接尝试获取插入符位置（不依赖光标句柄判断）
+    // 如果成功获取到插入符，说明当前处于文本输入状态
+    if (GetCaretScreenPosition(caretX, caretY)) {
+        POINT pt = { caretX, caretY };
         HMONITOR hMon = MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST);
         MONITORINFO mi = { sizeof(MONITORINFO) };
         
         if (GetMonitorInfo(hMon, &mi)) {
-            // 计算相对于当前显示器的局部坐标和总高度
             int monitorHeight = mi.rcMonitor.bottom - mi.rcMonitor.top;
-            int relativeY = clickY - mi.rcMonitor.top;
+            int relativeY = caretY - mi.rcMonitor.top;
             
-            // 转换为 0 ~ 10000 的万分比整数 (例如: 8533 代表 85.33%)
             currentState = (int)((relativeY * 10000.0f) / monitorHeight);
             currentState = std::clamp(currentState, 0, 10000);
         }
+        
+        g_textCursorActive = true;
+    } else {
+        g_textCursorActive = false;
     }
 
-    // 状态防抖: 只有状态改变(从 -1 变为有值，或百分比变化大于 1%) 时才发包
-    bool stateChanged = false;
-    if (currentState == -1 && g_lastSentState != -1) {
-        stateChanged = true; // 退出了输入状态
-    } else if (currentState != -1) {
-        // 如果高度变化超过 100 (即 1%)，认为切换了输入框
-        if (std::abs(currentState - g_lastSentState) > 100) {
-            stateChanged = true;
+    // 状态防抖: 变化超过 0.5% 或强制更新时才发送
+    int lastState = g_lastSentState.load(); // 原子读取
+    bool stateChanged = forceUpdate;
+    
+    if (!stateChanged) {
+        if (currentState == -1 && lastState != -1) {
+            stateChanged = true; // 退出文本输入
+        } else if (currentState != -1) {
+            // 降低阈值到 50 (0.5%)，提高灵敏度
+            if (std::abs(currentState - lastState) > 50) {
+                stateChanged = true;
+            }
         }
     }
 
     if (stateChanged) {
         if (currentState == -1) {
-            Logger::Get().Info("[状态检测] 退出文本输入状态");
+            Logger::Get().Debug("[文本光标] 退出输入状态");
         } else {
-            Logger::Get().Info("[状态检测] 文本框被点击，相对屏幕 Y 轴高度:", currentState / 100.0f, "%");
+            Logger::Get().Debug("[文本光标] Y 轴位置:", currentState / 100.0f, "%");
         }
         
-        // 异步发送给客户端
-        std::thread([currentState]() { 
-            g_net.BroadcastTextCursorState(currentState); 
-        }).detach();
-        
-        g_lastSentState = currentState;
+        g_net.BroadcastTextCursorState(currentState);
+        g_lastSentState.store(currentState); // 原子写入
     }
 }
 
-// 鼠标钩子回调
+// 鼠标钩子回调 (点击时立即更新)
 LRESULT CALLBACK MouseProc(int nCode, WPARAM wParam, LPARAM lParam) {
-    if (nCode == HC_ACTION) {
-        if (wParam == WM_LBUTTONUP) {
-            MSLLHOOKSTRUCT* pMouseStruct = (MSLLHOOKSTRUCT*)lParam;
-
-            CURSORINFO ci = { 0 };
-            ci.cbSize = sizeof(CURSORINFO);
-
-            if (GetCursorInfo(&ci)) {
-                bool isTextCursor = (ci.flags == CURSOR_SHOWING && ci.hCursor == g_hIBeam);
-                UpdateTextCursorState(isTextCursor, pMouseStruct->pt.x, pMouseStruct->pt.y);
-            }
-        }
+    if (nCode == HC_ACTION && wParam == WM_LBUTTONUP) {
+        UpdateTextCursorState(true); // 强制更新
     }
     return CallNextHookEx(g_hMouseHook, nCode, wParam, lParam);
+}
+
+// 键盘钩子回调 (输入时实时更新)
+LRESULT CALLBACK KeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
+    if (nCode == HC_ACTION && g_textCursorActive) {
+        // 只在按键按下时更新 (避免重复)
+        if (wParam == WM_KEYDOWN || wParam == WM_SYSKEYDOWN) {
+            UpdateTextCursorState();
+        }
+    }
+    return CallNextHookEx(g_hKeyboardHook, nCode, wParam, lParam);
+}
+
+// 文本光标监控线程 (高频轮询)
+void TextCursorMonitor() {
+    Logger::Get().Info("文本光标实时监控线程已启动");
+    
+    while (!g_exit) {
+        if (g_net.HasClients()) {
+            UpdateTextCursorState();
+        }
+        
+        // 100ms 轮询一次 (10Hz)，平衡性能与响应速度
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
 }
 
 // Windows 事件钩子：当光标改变时触发
@@ -1236,26 +1300,29 @@ int main(int argc, char *argv[])
 
     // 启动线程
     std::thread t1(Worker);
-    std::thread t2([&]
-                   { g_net.AcceptLoop(); });
-
-    // 初始化 I-Beam 句柄
-    g_hIBeam = LoadCursor(NULL, IDC_IBEAM);
+    std::thread t2([&] { g_net.AcceptLoop(); });
+    std::thread t3(TextCursorMonitor); // 新增：文本光标监控线程
 
     // 安装钩子 (图像变化钩子)
     HWINEVENTHOOK hHook = SetWinEventHook(EVENT_OBJECT_NAMECHANGE, EVENT_OBJECT_NAMECHANGE, NULL, HookProc, 0, 0, WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS);
 
-    // 安装全局低级鼠标钩子 (文本光标检测钩子)
+    // 安装全局低级鼠标钩子
     g_hMouseHook = SetWindowsHookEx(WH_MOUSE_LL, MouseProc, NULL, 0);
     if (!g_hMouseHook) {
-        Logger::Get().Error("鼠标钩子安装失败，防遮挡功能可能无法工作!");
+        Logger::Get().Error("鼠标钩子安装失败!");
+    }
+
+    // 安装全局低级键盘钩子 (新增)
+    g_hKeyboardHook = SetWindowsHookEx(WH_KEYBOARD_LL, KeyboardProc, NULL, 0);
+    if (!g_hKeyboardHook) {
+        Logger::Get().Error("键盘钩子安装失败!");
     } else {
-        Logger::Get().Info("全局鼠标点击监听已开启 (文本光标高度检测)");
+        Logger::Get().Info("文本光标实时追踪已启用 (鼠标+键盘+轮询)");
     }
 
     // 消息循环 (必须保留以响应钩子)
     MSG msg;
-    while (GetMessage(&msg, NULL, 0, 0))
+    while (!g_exit && GetMessage(&msg, NULL, 0, 0))
     {
         TranslateMessage(&msg);
         DispatchMessage(&msg);
@@ -1265,11 +1332,14 @@ int main(int argc, char *argv[])
     g_exit = true;
     g_cvCursorChanged.notify_all();
     g_net.Shutdown();
-    t1.join();
-    t2.join();
+    
+    if (t1.joinable()) t1.join();
+    if (t2.joinable()) t2.join();
+    if (t3.joinable()) t3.join();
     
     if (hHook) UnhookWinEvent(hHook);
-    if (g_hMouseHook) UnhookWindowsHookEx(g_hMouseHook); // 卸载鼠标钩子
+    if (g_hMouseHook) UnhookWindowsHookEx(g_hMouseHook);
+    if (g_hKeyboardHook) UnhookWindowsHookEx(g_hKeyboardHook);
     
     return 0;
 }
