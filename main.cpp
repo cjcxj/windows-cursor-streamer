@@ -16,8 +16,6 @@
 #define WIN32_LEAN_AND_MEAN
 #define _WINSOCK_DEPRECATED_NO_WARNINGS
 
-#include "config.h"
-
 // 2. 头文件
 #include <winsock2.h>
 #include <ws2tcpip.h>
@@ -55,7 +53,20 @@
 #pragma comment(lib, "shcore.lib")
 #pragma comment(lib, "ole32.lib")
 #pragma comment(lib, "advapi32.lib")
-#pragma comment(lib, "shell32.lib")
+
+// ==========================================
+//           4. 配置常量 (性能优化参数)
+// ==========================================
+
+constexpr int LISTEN_PORT = 5005;                 // TCP 监听端口
+constexpr int PNG_CACHE_MAX_SIZE = 200;           // 服务端 PNG 缓存最大条目数
+constexpr int CLIENT_CACHE_MAX_SIZE = 100;        // 客户端缓存最大条目数
+constexpr int LOG_SAMPLE_INTERVAL = 30;           // 日志采样间隔
+constexpr uint8_t ALPHA_THRESHOLD = 5;            // Alpha 通道阈值
+constexpr uint8_t XOR_EDGE_ALPHA = 0xFF;          // XOR 边界 Alpha 值
+constexpr int DPI_CHECK_INTERVAL_MS = 500;        // DPI 检查周期
+constexpr int DPI_DEBOUNCE_MS = 300;              // DPI 防抖延迟
+constexpr int LOG_ROTATE_SIZE_MB = 10;            // 日志轮转大小
 
 // ==========================================
 //           配置信息（详见 config.h）
