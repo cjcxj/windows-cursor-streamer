@@ -16,10 +16,11 @@
 #define WIN32_LEAN_AND_MEAN
 #define _WINSOCK_DEPRECATED_NO_WARNINGS
 
+#include "config.h"
+
 // 2. 头文件
 #include <winsock2.h>
 #include <ws2tcpip.h>
-#include <iphlpapi.h>
 
 #include <windows.h>
 #include <objidl.h>
@@ -57,10 +58,8 @@
 #pragma comment(lib, "shell32.lib")
 
 // ==========================================
-//           1. 配置
+//           配置信息（详见 config.h）
 // ==========================================
-
-const int LISTEN_PORT = 5005;
 
 // ==========================================
 //           2. 日志系统
@@ -79,6 +78,8 @@ class Logger
     std::mutex m_mutex;
     std::ofstream m_file;
     LogLevel m_level;
+    std::string m_logFile = "cursor_monitor.log";
+    size_t m_currentFileSize = 0;
 
 public:
     static Logger &Get()
@@ -89,7 +90,7 @@ public:
 
     Logger() : m_level(LogLevel::INFO)
     {
-        m_file.open("cursor_monitor.log", std::ios::app);
+        OpenLogFile();
         char *envLevel = nullptr;
         size_t len = 0;
         _dupenv_s(&envLevel, &len, "CURSOR_LOG_LEVEL");
@@ -107,13 +108,49 @@ public:
             free(envLevel);
         }
     }
+
     ~Logger()
     {
         if (m_file.is_open())
             m_file.close();
     }
+
     void SetLogLevel(LogLevel l) { m_level = l; }
 
+private:
+    void OpenLogFile()
+    {
+        m_file.open(m_logFile, std::ios::app);
+        if (m_file.is_open())
+        {
+            m_file.seekp(0, std::ios::end);
+            m_currentFileSize = m_file.tellp();
+        }
+    }
+
+    void RotateLogIfNeeded()
+    {
+        // 日志大小超过 LOG_ROTATE_SIZE_MB 时进行轮转
+        if (m_currentFileSize > (LOG_ROTATE_SIZE_MB * 1024 * 1024))
+        {
+            if (m_file.is_open())
+                m_file.close();
+
+            // 备份旧日志
+            auto now = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
+            std::tm tm_now;
+            localtime_s(&tm_now, &now);
+            
+            char backupName[256];
+            strftime(backupName, sizeof(backupName), "cursor_monitor_%Y%m%d_%H%M%S.log", &tm_now);
+            rename(m_logFile.c_str(), backupName);
+
+            m_currentFileSize = 0;
+            OpenLogFile();
+        }
+    }
+
+public:
     template <typename... Args>
     void Info(Args... args)
     {
@@ -147,13 +184,19 @@ private:
         ((std::cout << args << " "), ...);
         std::cout << std::endl;
 
-        // 文件输出
+        // 文件输出 (带日志轮转)
         if (m_file.is_open())
         {
             m_file << std::put_time(&tm_now, "%Y-%m-%d %H:%M:%S ") << prefix;
             ((m_file << args << " "), ...);
             m_file << std::endl;
+            m_file.flush();
+            
+            m_file.seekp(0, std::ios::end);
+            m_currentFileSize = m_file.tellp();
         }
+        
+        RotateLogIfNeeded();
     }
 };
 
@@ -378,8 +421,8 @@ public:
     void CachePng(uint32_t hash, const std::vector<uint8_t> &pngData)
     {
         std::lock_guard<std::mutex> lock(m_cacheMutex);
-        if (m_cache.size() > 50)
-            m_cache.clear(); // 简单清理
+        if (m_cache.size() > PNG_CACHE_MAX_SIZE)
+            m_cache.clear(); // 优化：缓存大小提升到 200
         m_cache[hash] = pngData;
     }
 
@@ -469,11 +512,16 @@ public:
 
                 // 记录该客户端已拥有此 Hash
                 client->cachedHashes.insert(hash);
-                // 防止长时间运行内存膨胀 (保留最近的 100 个光标足够用了)
-                if (client->cachedHashes.size() > 100)
+                // 优化：用配置常量替代硬编码，实现部分清空避免重新传输
+                if (client->cachedHashes.size() > CLIENT_CACHE_MAX_SIZE)
                 {
-                    client->cachedHashes.clear();
-                    // 清空后，下次遇到旧光标会重新发送一次全量包，这是安全的
+                    // LRU 优化：只清空一半以减少重新传输
+                    std::vector<uint32_t> toRemove;
+                    int removeCount = CLIENT_CACHE_MAX_SIZE / 2;
+                    for (auto it = client->cachedHashes.begin(); removeCount > 0 && it != client->cachedHashes.end(); ++it, --removeCount)
+                        toRemove.push_back(*it);
+                    for (auto h : toRemove)
+                        client->cachedHashes.erase(h);
                 }
             }
 
@@ -493,11 +541,15 @@ public:
                 client->lastSentHash = hash;
                 if (isCacheHit)
                 {
-                    Logger::Get().Debug("客户端缓存命中 (24B) -> Hash:", hash);
+                    static int s_cacheLogCounter = 0;
+                    if (s_cacheLogCounter++ % LOG_SAMPLE_INTERVAL == 0)
+                        Logger::Get().Debug("客户端缓存命中 (24B) -> Hash:", hash);
                 }
                 else
                 {
-                    Logger::Get().Debug("发送完整数据 (", pPacketToSend->size(), "B) -> Hash:", hash);
+                    static int s_fullLogCounter = 0;
+                    if (s_fullLogCounter++ % LOG_SAMPLE_INTERVAL == 0)
+                        Logger::Get().Debug("发送完整数据 (", pPacketToSend->size(), "B) -> Hash:", hash);
                 }
             }
             ++it;
@@ -667,7 +719,7 @@ class CursorEngine
         static auto s_lastCheck = std::chrono::steady_clock::now();
         auto now = std::chrono::steady_clock::now();
 
-        if (std::chrono::duration_cast<std::chrono::seconds>(now - s_lastCheck).count() > 2)
+        if (std::chrono::duration_cast<std::chrono::milliseconds>(now - s_lastCheck).count() > DPI_CHECK_INTERVAL_MS)
         {
             s_lastCheck = now;
             HKEY k;
@@ -816,7 +868,7 @@ public:
             }
             else
             {
-                if (std::chrono::duration_cast<std::chrono::milliseconds>(now - m_dpiChangeStartTime).count() > 500)
+                if (std::chrono::duration_cast<std::chrono::milliseconds>(now - m_dpiChangeStartTime).count() > DPI_DEBOUNCE_MS)
                 {
                     RestartApplication();
                 }
@@ -977,7 +1029,7 @@ public:
 
                 uint8_t alpha = (uint8_t)(255 - maxDiff);
 
-                if (alpha > 5)
+                if (alpha > ALPHA_THRESHOLD)
                 {
                     pOut[i] = (alpha << 24) | (br << 16) | (bg << 8) | bb;
                 }
@@ -1022,7 +1074,7 @@ public:
 
                 if (isBorder)
                 {
-                    rowOut[x] = 0xFF000000; // 纯黑边框
+                    rowOut[x] = (XOR_EDGE_ALPHA << 24); // 纯黑边框
                 }
             }
         }

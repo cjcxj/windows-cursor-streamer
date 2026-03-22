@@ -8,7 +8,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 
 # 增加源文件
-add_executable(CursorMonitor main.cpp)
+add_executable(CursorMonitor main.cpp config.h)
 
 # 链接 Windows 系统库
 target_link_libraries(CursorMonitor PRIVATE
