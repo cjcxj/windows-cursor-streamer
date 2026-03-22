@@ -1186,7 +1186,7 @@ void UpdateTextCursorState(int clickX, int clickY) {
         if (currentState == -1) {
             Logger::Get().Info("[状态检测] 退出文本输入状态");
         } else {
-            Logger::Get().Info("[状态检测] 鼠标点击位置，相对屏幕 Y 轴高度:", currentState / 100.0f, "%");
+            Logger::Get().Debug("[状态检测] 鼠标点击位置，相对屏幕 Y 轴高度:", currentState / 100.0f, "%");
         }
         
         // 安全的异步发送 (检查退出标志)
