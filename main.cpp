@@ -836,7 +836,6 @@ public:
         //  进入重绘流程 (只有光标真正改变时才执行)
         // ==========================================
 
-        int regSize = GetTargetSize();
         auto [frames, delay] = GetAnimInfo(ci.hCursor);
 
         ICONINFO ii = {0};
@@ -865,31 +864,20 @@ public:
         if (ii.hbmMask)
             DeleteObject(ii.hbmMask);
 
-        // 计算最终尺寸
+        // 计算最终尺寸：直接使用 GetIconInfo 返回的位图尺寸
+        // Windows 已经根据当前 DPI/分辨率渲染好了正确的光标大小，
+        // 不需要任何二次缩放 —— 原样输出即可保证远端与本地一致
         int finalSizeW = orgW;
         int finalSizeH = orgH;
-        bool isSystemCursor = (orgW == 32 || orgW == regSize || orgW == expectedTierSize);
 
-        // 格式：[DPI检测] DPI:144 | 档位:48 | 实际:48x48 -> SYSTEM (重置为32)
         Logger::Get().Debug(
-            "[DPI检测]",
+            "[光标捕获]",
             "DPI:", currentDpi,
-            "| 预测档位:", expectedTierSize,
-            "| 实际尺寸:", orgW, "x", orgH,
-            "->", isSystemCursor ? "SYSTEM (缩放)" : "CUSTOM (保持)");
+            "| 尺寸:", orgW, "x", orgH);
 
-        if (isSystemCursor)
-        {
-            double scaleFactor = expectedTierSize / 32.0;
-            finalSizeW = int(regSize * scaleFactor);
-            finalSizeH = int(regSize * scaleFactor);
-        }
-
-        // 热点计算
-        float scaleRatioW = (float)finalSizeW / (float)orgW;
-        float scaleRatioH = (float)finalSizeH / (float)orgH;
-        int hotX = std::clamp((int)(ii.xHotspot * scaleRatioW), 0, finalSizeW - 1);
-        int hotY = std::clamp((int)(ii.yHotspot * scaleRatioH), 0, finalSizeH - 1);
+        // 热点坐标 - 原始值，无需缩放
+        int hotX = std::clamp(ii.xHotspot, 0, finalSizeW - 1);
+        int hotY = std::clamp(ii.yHotspot, 0, finalSizeH - 1);
 
         int sheetW = finalSizeW;
         int sheetH = finalSizeH * frames;
