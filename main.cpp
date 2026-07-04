@@ -384,18 +384,18 @@ public:
     }
 
     // 5. 核心广播函数 (支持缓存协议)
-    void BroadcastCursor(uint32_t hash, int32_t hotX, int32_t hotY, int32_t frames, int32_t delay, const std::vector<uint8_t> &pngData)
+    void BroadcastCursor(uint32_t hash, int32_t hotX, int32_t hotY, int32_t frames, int32_t delay, int32_t dpi, const std::vector<uint8_t> &pngData)
     {
         std::lock_guard<std::mutex> lock(m_clientsMutex);
 
         // --- 预构建数据包 ---
 
-        // Header 部分 (20 字节)
-        // [Hash(4)] [HotX(4)] [HotY(4)] [Frames(4)] [Delay(4)]
-        const uint32_t HEADER_SIZE = 20;
+        // Header 部分 (24 字节)
+        // [Hash(4)] [HotX(4)] [HotY(4)] [Frames(4)] [Delay(4)] [Dpi(4)]
+        const uint32_t HEADER_SIZE = 24;
 
         // A. 完整包 (Full Packet)
-        // [BodyLen(4)] + [Header(20)] + [PNG Data...]
+        // [BodyLen(4)] + [Header(24)] + [PNG Data...]
         uint32_t fullBodySize = HEADER_SIZE + (uint32_t)pngData.size();
         std::vector<uint8_t> fullPacket(4 + fullBodySize);
         {
@@ -411,12 +411,14 @@ public:
             memcpy(p, &frames, 4);
             p += 4; // Frames
             memcpy(p, &delay, 4);
-            p += 4;                                    // Delay
+            p += 4; // Delay
+            memcpy(p, &dpi, 4);
+            p += 4;                                    // Dpi
             memcpy(p, pngData.data(), pngData.size()); // PNG
         }
 
         // B. 短包 (Cached Packet)
-        // [BodyLen(4)] + [Header(20)]
+        // [BodyLen(4)] + [Header(24)]
         uint32_t cachedBodySize = HEADER_SIZE;
         std::vector<uint8_t> cachedPacket(4 + cachedBodySize);
         {
@@ -432,6 +434,8 @@ public:
             memcpy(p, &frames, 4);
             p += 4;
             memcpy(p, &delay, 4);
+            p += 4;
+            memcpy(p, &dpi, 4);
         }
 
         // --- 遍历发送 ---
@@ -493,7 +497,7 @@ public:
                 client->lastSentHash = hash;
                 if (isCacheHit)
                 {
-                    Logger::Get().Debug("客户端缓存命中 (24B) -> Hash:", hash);
+                    Logger::Get().Debug("客户端缓存命中 (28B) -> Hash:", hash);
                 }
                 else
                 {
@@ -1061,7 +1065,7 @@ public:
         {
             mLastCursor = ci.hCursor;
             Logger::Get().Debug("发送光标 Hash:", hash);
-            m_net.BroadcastCursor(hash, hotX, hotY, frames, delay, m_pngBuffer);
+            m_net.BroadcastCursor(hash, hotX, hotY, frames, delay, (int32_t)currentDpi, m_pngBuffer);
         }
     }
 };
@@ -1341,7 +1345,4 @@ int main(int argc, char *argv[])
     
     if (hHook) UnhookWinEvent(hHook);
     if (g_hMouseHook) UnhookWindowsHookEx(g_hMouseHook);
-    if (g_hKeyboardHook) UnhookWindowsHookEx(g_hKeyboardHook);
-    
-    return 0;
-}
+    if (g_hKeyboardHook) UnhookWindowsHookEx(g_hKe
