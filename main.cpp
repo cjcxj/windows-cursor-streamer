@@ -1345,4 +1345,7 @@ int main(int argc, char *argv[])
     
     if (hHook) UnhookWinEvent(hHook);
     if (g_hMouseHook) UnhookWindowsHookEx(g_hMouseHook);
-    if (g_hKeyboardHook) UnhookWindowsHookEx(g_hKe
+    if (g_hKeyboardHook) UnhookWindowsHookEx(g_hKeyboardHook);
+
+    return 0;
+}
