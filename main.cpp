@@ -876,8 +876,8 @@ public:
             "| 尺寸:", orgW, "x", orgH);
 
         // 热点坐标 - 原始值，无需缩放
-        int hotX = std::clamp((int)ii.xHotspot, 0, finalSizeW - 1);
-        int hotY = std::clamp((int)ii.yHotspot, 0, finalSizeH - 1);
+        int hotX = std::clamp(static_cast<int>(ii.xHotspot), 0, finalSizeW - 1);
+        int hotY = std::clamp(static_cast<int>(ii.yHotspot), 0, finalSizeH - 1);
 
         int sheetW = finalSizeW;
         int sheetH = finalSizeH * frames;
@@ -1341,7 +1341,4 @@ int main(int argc, char *argv[])
     
     if (hHook) UnhookWinEvent(hHook);
     if (g_hMouseHook) UnhookWindowsHookEx(g_hMouseHook);
-    if (g_hKeyboardHook) UnhookWindowsHookEx(g_hKeyboardHook);
-    
-    return 0;
-}
+    if (g_hKeyboardHook) UnhookWindowsHookEx(g_hKe
