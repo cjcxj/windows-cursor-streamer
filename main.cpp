@@ -1343,4 +1343,5 @@ int main(int argc, char *argv[])
     if (g_hMouseHook) UnhookWindowsHookEx(g_hMouseHook);
     if (g_hKeyboardHook) UnhookWindowsHookEx(g_hKeyboardHook);
     
-    re
+    return 0;
+}
